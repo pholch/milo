@@ -36,7 +36,7 @@ npm install
 
 3. Edit configuration files:
 
-Create `SECRETS.js`:
+Edit `SECRETS.js`:
 ```
   APP_KEY: "your-twitter-app-key",
   APP_SECRET: "your-twitter-app-secret",
@@ -61,7 +61,6 @@ Edit `config.js`:
     
     // RPC URL (use private RPC for better reliability)
     RPC_URL: "https://api.mainnet-beta.solana.com"
-}
 ```
 
 ## How It Works
