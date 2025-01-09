@@ -21,7 +21,10 @@ const twitterClient = new TwitterApi({
   accessSecret: SECRETS.ACCESS_SECRET,
 });
 
-const chatGPT = new ChatGPTAPI({ apiKey: SECRETS.CHATGPT_API_KEY });
+const chatGPT = new ChatGPTAPI({ 
+  apiKey: SECRETS.CHATGPT_API_KEY,
+  model: 'gpt-4'
+});
 const postedTokens = new Set();
 
 // Initialize wallet
