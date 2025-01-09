@@ -112,7 +112,7 @@ Edit `config.js`:
 
 Start the bot:
 ```bash
-node index.mjs
+npm start
 ```
 
 The bot will:
