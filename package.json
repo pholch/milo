@@ -1,0 +1,22 @@
+{
+  "name": "automate-twitter-posts-with-ai",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.mjs"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@jup-ag/api": "^6.0.32",
+    "@project-serum/serum": "^0.13.65",
+    "@raydium-io/raydium-sdk": "^1.3.1-beta.58",
+    "@solana/spl-token": "^0.4.9",
+    "@solana/spl-token-swap": "^0.4.4",
+    "@solana/web3.js": "^1.98.0",
+    "chatgpt": "^5.2.5",
+    "twitter-api-v2": "^1.16.1"
+  }
+}
