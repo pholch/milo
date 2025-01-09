@@ -34,7 +34,7 @@ cd [repository-name]
 npm install
 ```
 
-3. Create configuration files:
+3. Edit configuration files:
 
 Create `SECRETS.js`:
 ```
@@ -45,7 +45,7 @@ Create `SECRETS.js`:
   CHATGPT_API_KEY: "your-chatgpt-api-key"
 ```
 
-Create `config.js`:
+Edit `config.js`:
 ```
     // Your wallet's private key (keep this secure!)
     PRIVATE_KEY: "your-wallet-private-key-as-array-or-base58",
