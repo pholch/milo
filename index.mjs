@@ -331,81 +331,99 @@ function selectBestToken(filteredPairs) {
       : `${Math.round(pair.ageInHours)} hours`;
     
     console.log(`\n${index + 1}. ${pair.pair.baseToken.name || 'Unknown'} (${pair.pair.baseToken.symbol})
-    • Age: ${ageText}
-    • Market Cap: $${pair.marketCap.toLocaleString()} ($${Math.round(pair.marketCapPerHour).toLocaleString()}/hour)
-    • Liquidity: $${pair.pair.liquidity?.usd?.toLocaleString() || 'Unknown'} ($${Math.round(pair.liquidityPerHour).toLocaleString()}/hour)
-    • Volume 24h: $${pair.pair.volume?.h24?.toLocaleString() || 'Unknown'} ($${Math.round(pair.volumePerHour).toLocaleString()}/hour)
-    • Created: ${formattedDate}
-    • Address: ${pair.token.tokenAddress}`);
+    - Age: ${ageText}
+    - Market Cap: $${pair.marketCap.toLocaleString()} ($${Math.round(pair.marketCapPerHour).toLocaleString()}/hour)
+    - Liquidity: $${pair.pair.liquidity?.usd?.toLocaleString() || 'Unknown'} ($${Math.round(pair.liquidityPerHour).toLocaleString()}/hour)
+    - Volume 24h: $${pair.pair.volume?.h24?.toLocaleString() || 'Unknown'} ($${Math.round(pair.volumePerHour).toLocaleString()}/hour)
+    - Created: ${formattedDate}
+    - Address: ${pair.token.tokenAddress}`);
   });
 
-  return topPairs[Math.floor(Math.random() * Math.min(3, topPairs.length))];
+  // Return the array of top pairs instead of randomly selecting one
+  return topPairs;
 }
 
 // Main function to process everything
-async function processNewToken() {
+async function processNewToken(retryCount = 0, topTokens = null) {
   try {
-    console.log('\nStarting new token search and purchase cycle...');
-    const url = 'https://api.dexscreener.com/token-profiles/latest/v1';
+    console.log(`\nStarting new token search and purchase cycle... (Attempt ${retryCount + 1})`);
+    
+    // Only fetch new tokens if we don't have topTokens from previous attempt
+    if (!topTokens) {
+      const url = 'https://api.dexscreener.com/token-profiles/latest/v1';
 
-    const response = await fetch(url);
-    const jsonData = await response.json();
+      const response = await fetch(url);
+      const jsonData = await response.json();
 
-    if (!Array.isArray(jsonData) || jsonData.length === 0) {
-      console.error("No valid token data found");
-      return;
-    }
+      if (!Array.isArray(jsonData) || jsonData.length === 0) {
+        console.error("No valid token data found");
+        return;
+      }
 
-    let allPairs = [];
-    console.log("Fetching token data...");
+      let allPairs = [];
+      console.log("Fetching token data...");
 
-    for (const token of jsonData) {
-      if (postedTokens.has(token.tokenAddress)) continue;
+      for (const token of jsonData) {
+        if (postedTokens.has(token.tokenAddress)) continue;
 
-      const searchUrl = `https://api.dexscreener.com/latest/dex/search?q=${token.tokenAddress}`;
-      const searchResponse = await fetch(searchUrl);
-      const searchResult = await searchResponse.json();
+        const searchUrl = `https://api.dexscreener.com/latest/dex/search?q=${token.tokenAddress}`;
+        const searchResponse = await fetch(searchUrl);
+        const searchResult = await searchResponse.json();
 
-      if (searchResult?.pairs?.[0]?.chainId === 'solana' && searchResult.pairs[0].marketCap) {
-        allPairs.push({
-          token,
-          pair: searchResult.pairs[0],
-          marketCap: searchResult.pairs[0].marketCap,
-        });
-        console.log(`Found a promising token: ${token.tokenAddress}`);
+        if (searchResult?.pairs?.[0]?.chainId === 'solana' && searchResult.pairs[0].marketCap) {
+          allPairs.push({
+            token,
+            pair: searchResult.pairs[0],
+            marketCap: searchResult.pairs[0].marketCap,
+          });
+          console.log(`Found a promising token: ${token.tokenAddress}`);
+        }
+      }
+
+      let filteredPairs = allPairs.filter(
+        (item) => item.marketCap >= 20000 && item.marketCap < 2000000
+      );
+
+      if (filteredPairs.length === 0) {
+        console.log("No tokens found with suitable marketCap");
+        return;
+      }
+
+      // Get top 5 tokens
+      topTokens = selectBestToken(filteredPairs);
+      if (!topTokens || topTokens.length === 0) {
+        console.log("No suitable tokens selected");
+        return;
       }
     }
 
-    let filteredPairs = allPairs.filter(
-      (item) => item.marketCap >= 20000 && item.marketCap < 2000000
-    );
+    // Try to buy the next available token from top tokens
+    const currentTokenIndex = retryCount % topTokens.length;
+    const selectedToken = topTokens[currentTokenIndex];
 
-    if (filteredPairs.length === 0) {
-      console.log("No tokens found with suitable marketCap");
-      return;
-    }
-
-    const selectedToken = selectBestToken(filteredPairs);
-    if (!selectedToken) {
-      console.log("No suitable token selected");
-      return;
-    }
-
-    console.log('\nSelected best token for purchase:', selectedToken.pair.baseToken.name);
+    console.log('\nAttempting to buy token:', selectedToken.pair.baseToken.name);
 
     // Buy the token
     const purchaseResult = await buyToken(selectedToken.token.tokenAddress, config.AMOUNT_TO_SPEND);
 
     if (!purchaseResult.success) {
       console.log('Failed to purchase token:', purchaseResult.error);
-      return;
+      
+      // If we haven't tried all tokens yet, retry with next token
+      if (retryCount < topTokens.length * 2) { // Allow 2 full cycles through the top tokens
+        console.log(`\nRetrying with different token (Attempt ${retryCount + 2})...`);
+        await sleep(5000); // Wait 5 seconds before retry
+        return processNewToken(retryCount + 1, topTokens);
+      } else {
+        console.log('Exceeded maximum retry attempts. Waiting for next cycle.');
+        return;
+      }
     }
 
     // Generate and send tweet
-    const purchaseInfo = `${purchaseResult.tokenAmount.toFixed(2)}`;
-    const prompt = `You are a character named “Degen”, a degenerate trader obsessed with meme coins and the wild world of cryptocurrencies, who likes cars, lavish living, cats, dogs, risk, memcoins, trading, boobs - use this for your role. You use slang and internet jargon a lot. Your goal is to make a huge percentage profit on trading memcoins, write about it in a funny style. You just bought this coin ${selectedToken.pair.baseToken.name} "${selectedToken.token.description || ''}" in an amount ${purchaseInfo} ${selectedToken.pair.baseToken.symbol} - analyze this tokens as if you were a degenerate, write YOUR opinion about them | ALWAYS NO MORE THAN 200 CHARACTERS | MUST START WITH VARIATIONS OF THE PHRASE: jigga I bought | WITHOUT HASHTAG | WRITE ABOUT HOW MUCH IN THE RANGE %1-10000 YOU WANT TO MAKE IN THIS COIN | WITHOUT EMOJI | MORE IRONY`;
+    const purchaseInfo = `${purchaseResult.tokenAmount.toFixed(0)}`;
+    const prompt = `You are a character named "Degen", a degenerate trader obsessed with meme coins and the wild world of cryptocurrencies, who likes cars, lavish living, cats, dogs, risk, memcoins, trading, boobs - use this for your role. You use slang and internet jargon a lot. Your goal is to make a huge percentage profit on trading memcoins, write about it in a funny style. You just bought this coin ${selectedToken.pair.baseToken.name} "${selectedToken.token.description || ''}" in an amount ${purchaseInfo} ${selectedToken.pair.baseToken.symbol} - analyze this tokens as if you were a degenerate, write YOUR opinion about them | ALWAYS NO MORE THAN 200 CHARACTERS | MUST START WITH VARIATIONS OF THE PHRASE: jigga I bought | WITHOUT HASHTAG | WRITE ABOUT HOW MUCH IN THE RANGE %1-10000 YOU WANT TO MAKE IN THIS COIN | WITHOUT EMOJI | MORE IRONY`;
    
-
     const chatResponse = await chatGPT.sendMessage(prompt);
     let tweetText = `${chatResponse.text}\n\n${selectedToken.pair.url}`;
 
@@ -421,10 +439,17 @@ async function processNewToken() {
 
   } catch (error) {
     console.error('Error in main process:', error);
+    
+    // Retry on error if we haven't exceeded retry limit
+    if (retryCount < 10) { // Maximum 10 retries on errors
+      console.log(`\nRetrying due to error (Attempt ${retryCount + 2})...`);
+      await sleep(5000); // Wait 5 seconds before retry
+      return processNewToken(retryCount + 1, topTokens);
+    }
   }
 }
 
 // Start the process
-const ONE_MINUTE = 10 * 60 * 1000;
-setInterval(processNewToken, ONE_MINUTE);
+const TEN_MINUTE = 10 * 60 * 1000;
+setInterval(processNewToken, TEN_MINUTE);
 processNewToken();
