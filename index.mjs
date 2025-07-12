@@ -7,43 +7,66 @@ import bs58 from 'bs58';
 import SECRETS from './SECRETS.js';
 import config from './config.js';
 
-// ========== OPTIMIZED CONFIGURATION ==========
-const OPTIMIZED_CONFIG = {
+// ========== INTELLIGENT MEME COIN CONFIGURATION ==========
+const MEME_CONFIG = {
   // Trading Parameters
-  AMOUNT_TO_SPEND: 0.006, // €8.10 per trade - optimal for diversification
-  SLIPPAGE_BPS: 2000, // 20% instead of 50% for better prices
-  PRIORITY_FEE_SOL: 0.0015, // Higher priority for faster execution
+  AMOUNT_TO_SPEND: 0.006, // €8.10 per trade
+  SLIPPAGE_BPS: 2000, // 20% slippage for meme coins
+  PRIORITY_FEE_SOL: 0.0015, // High priority for fast execution
   
   // Portfolio Management
-  MAX_POSITIONS: 20, // Maximum different tokens to hold
-  MIN_POSITION_VALUE_EUR: 2, // Cleanup positions below this value
+  MAX_POSITIONS: 20, // Maximum different tokens
+  MIN_POSITION_VALUE_EUR: 1.50, // Cleanup very small positions
   
-  // Risk Management
-  STOP_LOSS_PERCENT: -80, // Exit if token drops 80%
-  TAKE_PROFIT_PERCENT: 200, // Exit if token gains 200%
-  MAX_TOKEN_AGE_DAYS: 14, // Sell stagnant tokens after 14 days
-  MIN_WALLET_RESERVE: 0.05, // Keep minimum SOL for fees
+  // Intelligent Trailing Stop-Loss System
+  TRAILING_STOP: {
+    // Initial grace period - no stop loss for new positions
+    GRACE_PERIOD_HOURS: 6, // Let meme coins develop for 6 hours
+    
+    // Initial stop-loss after grace period
+    INITIAL_STOP_PERCENT: -70, // -70% stop loss after grace period
+    
+    // Trailing stop levels - when to move stop loss up
+    LEVELS: [
+      { profitThreshold: 30, stopLoss: -10 },   // At +30%, stop at -10%
+      { profitThreshold: 80, stopLoss: 20 },    // At +80%, stop at +20%
+      { profitThreshold: 150, stopLoss: 60 },   // At +150%, stop at +60%
+      { profitThreshold: 300, stopLoss: 120 },  // At +300%, stop at +120%
+      { profitThreshold: 600, stopLoss: 250 },  // At +600%, stop at +250%
+      { profitThreshold: 1000, stopLoss: 400 }, // At +1000%, stop at +400%
+      { profitThreshold: 2000, stopLoss: 800 }  // At +2000%, stop at +800%
+    ],
+    
+    // Volatility buffer - don't trigger on small dips
+    VOLATILITY_BUFFER: 15, // Allow 15% dip from peak before triggering
+    
+    // Time-based adjustments
+    WEEKEND_MULTIPLIER: 1.3, // 30% more buffer on weekends (less liquidity)
+    NIGHT_MULTIPLIER: 1.2,   // 20% more buffer during night hours (low volume)
+  },
   
-  // Market Cap Filters (optimized range)
-  MIN_MARKET_CAP: 50000, // Increased from 20k to avoid scams
-  MAX_MARKET_CAP: 1000000, // Decreased from 2M for better upside
-  
-  // Trading Schedule (UTC hours when to trade)
-  ACTIVE_HOURS: [14, 15, 16, 17, 18, 20, 21, 22, 23], // Peak times
+  // Market Cap Filters
+  MIN_MARKET_CAP: 50000, // $50k minimum
+  MAX_MARKET_CAP: 1000000, // $1M maximum
+  MIN_LIQUIDITY: 15000, // $15k minimum liquidity
   
   // Performance Tracking
   PERFORMANCE_LOG_ENABLED: true,
-  WIN_RATE_TARGET: 40, // Target 40% win rate
+  TARGET_WIN_RATE: 45, // Target 45% win rate
+  
+  // Risk Management
+  MIN_WALLET_RESERVE: 0.05, // Keep 0.05 SOL for fees
+  MAX_DAILY_TRADES: 10, // Limit daily trades to prevent overtrading
 };
 
-// ========== ENHANCED CONNECTION ==========
+// ========== CONNECTION SETUP ==========
 const connection = new Connection(config.RPC_URL || 'https://rpc.ankr.com/solana', {
   commitment: 'confirmed',
   confirmTransactionInitialTimeout: 60000,
   wsEndpoint: (config.RPC_URL || 'https://rpc.ankr.com/solana').replace('https://', 'wss://')
 });
 
-// ========== TWITTER & AI CLIENTS ==========
+// ========== CLIENT INITIALIZATION ==========
 const twitterClient = new TwitterApi({
   appKey: SECRETS.APP_KEY,
   appSecret: SECRETS.APP_SECRET,
@@ -58,12 +81,13 @@ const chatGPT = new ChatGPTAPI({
 
 // ========== GLOBAL STATE ==========
 const postedTokens = new Set();
-const portfolioTracker = new Map(); // Track all positions
+const portfolioTracker = new Map(); // Enhanced position tracking
 const performanceLog = [];
+const dailyTradeCount = new Map(); // Track daily trades
 let totalTrades = 0;
-let winnigTrades = 0;
+let winningTrades = 0;
 
-// ========== INITIALIZE WALLET ==========
+// ========== WALLET SETUP ==========
 let privateKeyArray;
 try {
   privateKeyArray = JSON.parse(config.PRIVATE_KEY);
@@ -81,13 +105,123 @@ function getCurrentHourUTC() {
   return new Date().getUTCHours();
 }
 
-function isActiveTradingTime() {
-  const currentHour = getCurrentHourUTC();
-  return OPTIMIZED_CONFIG.ACTIVE_HOURS.includes(currentHour);
+function isWeekend() {
+  const day = new Date().getUTCDay();
+  return day === 0 || day === 6; // Sunday = 0, Saturday = 6
 }
 
-function logPerformance(action, tokenAddress, tokenName, entryPrice, currentPrice, pnlPercent) {
-  if (!OPTIMIZED_CONFIG.PERFORMANCE_LOG_ENABLED) return;
+function isNightTime() {
+  const hour = getCurrentHourUTC();
+  return hour >= 22 || hour <= 6; // 10PM - 6AM UTC
+}
+
+function getTodayKey() {
+  return new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+}
+
+// ========== INTELLIGENT TRAILING STOP LOSS ==========
+function calculateTrailingStopLoss(position) {
+  const now = new Date();
+  const ageInHours = (now - position.entryDate) / (1000 * 60 * 60);
+  const currentPnL = position.pnlPercent || 0;
+  
+  // Grace period - no stop loss for new positions
+  if (ageInHours < MEME_CONFIG.TRAILING_STOP.GRACE_PERIOD_HOURS) {
+    return {
+      stopLoss: null,
+      reason: `Grace period (${ageInHours.toFixed(1)}h < ${MEME_CONFIG.TRAILING_STOP.GRACE_PERIOD_HOURS}h)`
+    };
+  }
+  
+  // Find the highest applicable trailing level
+  let applicableStopLoss = MEME_CONFIG.TRAILING_STOP.INITIAL_STOP_PERCENT;
+  let appliedLevel = null;
+  
+  for (const level of MEME_CONFIG.TRAILING_STOP.LEVELS) {
+    if (position.highestPnL >= level.profitThreshold) {
+      applicableStopLoss = level.stopLoss;
+      appliedLevel = level;
+    } else {
+      break; // Levels are ordered, so we can break early
+    }
+  }
+  
+  // Apply time-based multipliers for volatility buffer
+  let volatilityMultiplier = 1;
+  if (isWeekend()) {
+    volatilityMultiplier *= MEME_CONFIG.TRAILING_STOP.WEEKEND_MULTIPLIER;
+  }
+  if (isNightTime()) {
+    volatilityMultiplier *= MEME_CONFIG.TRAILING_STOP.NIGHT_MULTIPLIER;
+  }
+  
+  // Add volatility buffer
+  const buffer = MEME_CONFIG.TRAILING_STOP.VOLATILITY_BUFFER * volatilityMultiplier;
+  const adjustedStopLoss = applicableStopLoss - buffer;
+  
+  return {
+    stopLoss: adjustedStopLoss,
+    appliedLevel,
+    volatilityMultiplier,
+    buffer,
+    reason: appliedLevel 
+      ? `Trailing at level: +${appliedLevel.profitThreshold}% → ${appliedLevel.stopLoss}% (adjusted: ${adjustedStopLoss.toFixed(1)}%)`
+      : `Initial stop: ${adjustedStopLoss.toFixed(1)}% (with ${buffer.toFixed(1)}% buffer)`
+  };
+}
+
+function shouldSellWithTrailingStop(position) {
+  const currentPnL = position.pnlPercent || 0;
+  
+  // Update highest PnL if current is higher
+  if (currentPnL > (position.highestPnL || position.entryPnL || 0)) {
+    position.highestPnL = currentPnL;
+    position.highestPnLDate = new Date();
+    console.log(`📈 New high for ${position.tokenName}: ${currentPnL.toFixed(2)}%`);
+  }
+  
+  // Calculate current trailing stop
+  const trailingStop = calculateTrailingStopLoss(position);
+  
+  // Update position with current stop level for tracking
+  position.currentStopLoss = trailingStop.stopLoss;
+  position.stopReason = trailingStop.reason;
+  
+  // Check if we should sell
+  if (trailingStop.stopLoss !== null && currentPnL <= trailingStop.stopLoss) {
+    return {
+      shouldSell: true,
+      reason: 'TRAILING_STOP',
+      details: `Current: ${currentPnL.toFixed(2)}% ≤ Stop: ${trailingStop.stopLoss.toFixed(2)}%`,
+      trailingInfo: trailingStop.reason
+    };
+  }
+  
+  // Age-based forced exit for very old positions with poor performance
+  const ageInDays = (new Date() - position.entryDate) / (1000 * 60 * 60 * 24);
+  if (ageInDays > 21 && currentPnL < -50) {
+    return {
+      shouldSell: true,
+      reason: 'AGE_FORCED_EXIT',
+      details: `${ageInDays.toFixed(1)} days old with ${currentPnL.toFixed(2)}% loss`
+    };
+  }
+  
+  // Cleanup very small positions
+  if (position.currentValue < MEME_CONFIG.MIN_POSITION_VALUE_EUR) {
+    return {
+      shouldSell: true,
+      reason: 'POSITION_CLEANUP',
+      details: `Value: $${position.currentValue.toFixed(2)} < $${MEME_CONFIG.MIN_POSITION_VALUE_EUR}`
+    };
+  }
+  
+  return { shouldSell: false };
+}
+
+// ========== PERFORMANCE TRACKING ==========
+function logPerformance(action, tokenAddress, tokenName, entryPrice, currentPrice, pnlPercent, additionalInfo = {}) {
+  if (!MEME_CONFIG.PERFORMANCE_LOG_ENABLED) return;
   
   const logEntry = {
     timestamp: new Date().toISOString(),
@@ -97,18 +231,30 @@ function logPerformance(action, tokenAddress, tokenName, entryPrice, currentPric
     entryPrice,
     currentPrice,
     pnlPercent,
-    tradeNumber: totalTrades
+    tradeNumber: totalTrades,
+    ...additionalInfo
   };
   
   performanceLog.push(logEntry);
+  
   console.log(`\n📊 PERFORMANCE LOG - ${action.toUpperCase()}`);
   console.log(`Token: ${tokenName} (${tokenAddress.slice(0,8)}...)`);
-  console.log(`Entry: $${entryPrice.toFixed(6)} | Current: $${currentPrice.toFixed(6)}`);
-  console.log(`P&L: ${pnlPercent > 0 ? '+' : ''}${pnlPercent.toFixed(2)}%`);
-  console.log(`Total Trades: ${totalTrades} | Win Rate: ${(winnigTrades/totalTrades*100).toFixed(1)}%`);
+  if (entryPrice && currentPrice) {
+    console.log(`Entry: $${entryPrice.toFixed(6)} | Current: $${currentPrice.toFixed(6)}`);
+  }
+  if (pnlPercent !== undefined) {
+    console.log(`P&L: ${pnlPercent > 0 ? '+' : ''}${pnlPercent.toFixed(2)}%`);
+  }
+  if (additionalInfo.holdTime) {
+    console.log(`Hold Time: ${additionalInfo.holdTime}`);
+  }
+  if (additionalInfo.highestPnL) {
+    console.log(`Peak Gain: +${additionalInfo.highestPnL.toFixed(2)}%`);
+  }
+  console.log(`Total Trades: ${totalTrades} | Win Rate: ${totalTrades > 0 ? (winningTrades/totalTrades*100).toFixed(1) : 0}%`);
 }
 
-// ========== ENHANCED TOKEN BALANCE FUNCTIONS ==========
+// ========== TOKEN BALANCE & PRICE FUNCTIONS ==========
 async function getTokenBalance(tokenAddress) {
   try {
     const tokenAccounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, {
@@ -142,69 +288,60 @@ async function getTokenPrice(tokenAddress) {
 
 // ========== PORTFOLIO MANAGEMENT ==========
 async function updatePortfolioTracker() {
-  console.log('\n🔄 Updating portfolio tracker...');
+  console.log('\n🔄 Updating portfolio with intelligent tracking...');
   
   for (const [tokenAddress, position] of portfolioTracker) {
     const currentBalance = await getTokenBalance(tokenAddress);
     const currentPrice = await getTokenPrice(tokenAddress);
     const currentValue = currentBalance * currentPrice;
-    const pnlPercent = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
+    const pnlPercent = position.entryPrice > 0 ? 
+      ((currentPrice - position.entryPrice) / position.entryPrice) * 100 : 0;
     
+    // Calculate hold time
+    const holdTimeMs = new Date() - position.entryDate;
+    const holdTimeHours = holdTimeMs / (1000 * 60 * 60);
+    const holdTimeText = holdTimeHours < 24 ? 
+      `${holdTimeHours.toFixed(1)}h` : 
+      `${(holdTimeHours/24).toFixed(1)}d`;
+    
+    // Update position
     portfolioTracker.set(tokenAddress, {
       ...position,
       currentBalance,
       currentPrice,
       currentValue,
       pnlPercent,
+      holdTime: holdTimeText,
       lastUpdated: new Date()
     });
     
-    console.log(`📈 ${position.tokenName}: ${pnlPercent > 0 ? '+' : ''}${pnlPercent.toFixed(2)}% | $${currentValue.toFixed(2)}`);
+    // Calculate current trailing stop for display
+    const trailingInfo = calculateTrailingStopLoss(position);
+    const stopDisplay = trailingInfo.stopLoss !== null ? 
+      `Stop: ${trailingInfo.stopLoss.toFixed(1)}%` : 
+      'No Stop (Grace)';
+    
+    console.log(`📈 ${position.tokenName}: ${pnlPercent > 0 ? '+' : ''}${pnlPercent.toFixed(2)}% | $${currentValue.toFixed(2)} | ${holdTimeText} | ${stopDisplay}`);
   }
 }
 
-async function shouldSellToken(tokenAddress, position) {
-  const daysSinceEntry = (new Date() - position.entryDate) / (1000 * 60 * 60 * 24);
-  
-  // Stop Loss - Token dropped 80%
-  if (position.pnlPercent <= OPTIMIZED_CONFIG.STOP_LOSS_PERCENT) {
-    console.log(`🔴 STOP LOSS triggered for ${position.tokenName}: ${position.pnlPercent.toFixed(2)}%`);
-    return { shouldSell: true, reason: 'STOP_LOSS' };
-  }
-  
-  // Take Profit - Token gained 200%
-  if (position.pnlPercent >= OPTIMIZED_CONFIG.TAKE_PROFIT_PERCENT) {
-    console.log(`🟢 TAKE PROFIT triggered for ${position.tokenName}: ${position.pnlPercent.toFixed(2)}%`);
-    return { shouldSell: true, reason: 'TAKE_PROFIT' };
-  }
-  
-  // Age-based exit - Token older than 14 days with poor performance
-  if (daysSinceEntry > OPTIMIZED_CONFIG.MAX_TOKEN_AGE_DAYS && position.pnlPercent < 0) {
-    console.log(`🕐 AGE EXIT triggered for ${position.tokenName}: ${daysSinceEntry.toFixed(1)} days old`);
-    return { shouldSell: true, reason: 'AGE_EXIT' };
-  }
-  
-  // Value-based cleanup - Position worth less than €2
-  if (position.currentValue < OPTIMIZED_CONFIG.MIN_POSITION_VALUE_EUR) {
-    console.log(`🧹 CLEANUP triggered for ${position.tokenName}: $${position.currentValue.toFixed(2)}`);
-    return { shouldSell: true, reason: 'CLEANUP' };
-  }
-  
-  return { shouldSell: false, reason: null };
-}
-
-async function sellToken(tokenAddress, position, reason) {
+async function sellToken(tokenAddress, position, sellInfo) {
   try {
-    console.log(`\n💰 Selling ${position.tokenName} - Reason: ${reason}`);
+    console.log(`\n💰 SELLING ${position.tokenName} - ${sellInfo.reason}`);
+    console.log(`📊 ${sellInfo.details}`);
+    if (sellInfo.trailingInfo) {
+      console.log(`🎯 ${sellInfo.trailingInfo}`);
+    }
     
     const balance = await getTokenBalance(tokenAddress);
     if (balance <= 0) {
-      console.log('No balance to sell');
+      console.log('❌ No balance to sell');
       return { success: false, error: 'No balance' };
     }
     
     // Get quote for selling
-    const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=${tokenAddress}&outputMint=So11111111111111111111111111111111111111112&amount=${Math.floor(balance * Math.pow(10, position.decimals || 9))}&slippageBps=${OPTIMIZED_CONFIG.SLIPPAGE_BPS}`;
+    const decimals = position.decimals || 9;
+    const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=${tokenAddress}&outputMint=So11111111111111111111111111111111111111112&amount=${Math.floor(balance * Math.pow(10, decimals))}&slippageBps=${MEME_CONFIG.SLIPPAGE_BPS}`;
     
     const quoteResponse = await fetch(quoteUrl);
     const quoteData = await quoteResponse.json();
@@ -213,14 +350,14 @@ async function sellToken(tokenAddress, position, reason) {
       throw new Error(`Sell quote error: ${quoteData.error}`);
     }
     
-    // Execute sell transaction (similar to buy logic)
+    // Execute sell transaction
     const swapRequestBody = {
       quoteResponse: quoteData,
       userPublicKey: wallet.publicKey.toString(),
       wrapUnwrapSOL: true,
       dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: OPTIMIZED_CONFIG.PRIORITY_FEE_SOL * 1e9,
-      dynamicSlippage: { maxBps: OPTIMIZED_CONFIG.SLIPPAGE_BPS }
+      prioritizationFeeLamports: Math.floor(MEME_CONFIG.PRIORITY_FEE_SOL * 1e9),
+      dynamicSlippage: { maxBps: MEME_CONFIG.SLIPPAGE_BPS }
     };
     
     const swapResponse = await fetch('https://quote-api.jup.ag/v6/swap', {
@@ -246,41 +383,94 @@ async function sellToken(tokenAddress, position, reason) {
     });
     
     console.log(`✅ Sell transaction sent: ${signature}`);
+    console.log(`🔍 Explorer: https://solscan.io/tx/${signature}`);
+    
+    // Calculate final metrics
+    const holdTimeMs = new Date() - position.entryDate;
+    const holdTimeHours = holdTimeMs / (1000 * 60 * 60);
+    const holdTimeText = holdTimeHours < 24 ? 
+      `${holdTimeHours.toFixed(1)}h` : 
+      `${(holdTimeHours/24).toFixed(1)}d`;
     
     // Update performance tracking
     if (position.pnlPercent > 0) {
-      winnigTrades++;
+      winningTrades++;
     }
     
-    logPerformance('SELL', tokenAddress, position.tokenName, position.entryPrice, position.currentPrice, position.pnlPercent);
+    logPerformance('SELL', tokenAddress, position.tokenName, 
+      position.entryPrice, position.currentPrice, position.pnlPercent, {
+        holdTime: holdTimeText,
+        highestPnL: position.highestPnL || position.pnlPercent,
+        sellReason: sellInfo.reason,
+        sellDetails: sellInfo.details
+      });
     
     // Remove from portfolio tracker
     portfolioTracker.delete(tokenAddress);
     
-    return { success: true, signature, pnl: position.pnlPercent };
+    return { 
+      success: true, 
+      signature, 
+      pnl: position.pnlPercent,
+      holdTime: holdTimeText 
+    };
     
   } catch (error) {
-    console.error('Error selling token:', error.message);
+    console.error('❌ Error selling token:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ========== PORTFOLIO CLEANUP ==========
-async function performPortfolioCleanup() {
-  console.log('\n🧹 Performing portfolio cleanup...');
+// ========== PORTFOLIO MANAGEMENT ==========
+async function performIntelligentPortfolioManagement() {
+  console.log('\n🧠 Performing intelligent portfolio management...');
   
   await updatePortfolioTracker();
   
+  let sellActions = 0;
   for (const [tokenAddress, position] of portfolioTracker) {
-    const { shouldSell, reason } = await shouldSellToken(tokenAddress, position);
+    const sellDecision = shouldSellWithTrailingStop(position);
     
-    if (shouldSell) {
-      await sellToken(tokenAddress, position, reason);
-      await sleep(2000); // Wait between sells
+    if (sellDecision.shouldSell) {
+      console.log(`\n🎯 Sell signal: ${position.tokenName} - ${sellDecision.reason}`);
+      await sellToken(tokenAddress, position, sellDecision);
+      sellActions++;
+      await sleep(2000); // Pause between sells
     }
   }
   
-  console.log(`📊 Portfolio size after cleanup: ${portfolioTracker.size} positions`);
+  console.log(`📊 Portfolio management complete: ${sellActions} sells executed`);
+  console.log(`📈 Current portfolio size: ${portfolioTracker.size} positions`);
+  
+  // Log portfolio summary
+  if (portfolioTracker.size > 0) {
+    const totalValue = Array.from(portfolioTracker.values())
+      .reduce((sum, pos) => sum + (pos.currentValue || 0), 0);
+    const avgPnL = Array.from(portfolioTracker.values())
+      .reduce((sum, pos) => sum + (pos.pnlPercent || 0), 0) / portfolioTracker.size;
+    
+    console.log(`💰 Total portfolio value: $${totalValue.toFixed(2)}`);
+    console.log(`📊 Average P&L: ${avgPnL > 0 ? '+' : ''}${avgPnL.toFixed(2)}%`);
+  }
+}
+
+// ========== DAILY TRADE LIMIT CHECK ==========
+function canTradeToday() {
+  const today = getTodayKey();
+  const todayTrades = dailyTradeCount.get(today) || 0;
+  
+  if (todayTrades >= MEME_CONFIG.MAX_DAILY_TRADES) {
+    console.log(`⚠️ Daily trade limit reached: ${todayTrades}/${MEME_CONFIG.MAX_DAILY_TRADES}`);
+    return false;
+  }
+  
+  return true;
+}
+
+function incrementDailyTradeCount() {
+  const today = getTodayKey();
+  const currentCount = dailyTradeCount.get(today) || 0;
+  dailyTradeCount.set(today, currentCount + 1);
 }
 
 // ========== RISK MANAGEMENT ==========
@@ -288,20 +478,23 @@ async function checkRiskLimits() {
   const solBalance = await connection.getBalance(wallet.publicKey) / 1e9;
   
   // Check minimum wallet reserve
-  if (solBalance < OPTIMIZED_CONFIG.MIN_WALLET_RESERVE) {
-    console.log(`⚠️ LOW BALANCE WARNING: ${solBalance.toFixed(4)} SOL remaining`);
-    console.log(`Trading paused - minimum reserve: ${OPTIMIZED_CONFIG.MIN_WALLET_RESERVE} SOL`);
+  if (solBalance < MEME_CONFIG.MIN_WALLET_RESERVE) {
+    console.log(`⚠️ LOW BALANCE: ${solBalance.toFixed(4)} SOL < ${MEME_CONFIG.MIN_WALLET_RESERVE} SOL reserve`);
+    return false;
+  }
+  
+  // Check daily trade limit
+  if (!canTradeToday()) {
     return false;
   }
   
   // Check maximum positions
-  if (portfolioTracker.size >= OPTIMIZED_CONFIG.MAX_POSITIONS) {
-    console.log(`⚠️ MAX POSITIONS REACHED: ${portfolioTracker.size}/${OPTIMIZED_CONFIG.MAX_POSITIONS}`);
-    console.log('Performing cleanup before new trades...');
-    await performPortfolioCleanup();
+  if (portfolioTracker.size >= MEME_CONFIG.MAX_POSITIONS) {
+    console.log(`⚠️ MAX POSITIONS: ${portfolioTracker.size}/${MEME_CONFIG.MAX_POSITIONS}`);
+    await performIntelligentPortfolioManagement();
     
-    if (portfolioTracker.size >= OPTIMIZED_CONFIG.MAX_POSITIONS) {
-      console.log('Still at max positions after cleanup - skipping new trades');
+    if (portfolioTracker.size >= MEME_CONFIG.MAX_POSITIONS) {
+      console.log('Still at max positions after management - skipping new trades');
       return false;
     }
   }
@@ -309,14 +502,13 @@ async function checkRiskLimits() {
   return true;
 }
 
-// ========== ENHANCED TRANSACTION FUNCTIONS ==========
-async function confirmTransactionWithRetry(connection, signature, maxRetries = 3, timeoutSeconds = 60) {
+// ========== TRANSACTION FUNCTIONS ==========
+async function confirmTransactionWithRetry(connection, signature, maxRetries = 3) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      console.log(`\nConfirmation attempt ${attempt}/${maxRetries}...`);
+      console.log(`Confirmation attempt ${attempt}/${maxRetries}...`);
       
       const latestBlockhash = await connection.getLatestBlockhash();
-      
       const confirmation = await connection.confirmTransaction({
         signature: signature,
         blockhash: latestBlockhash.blockhash,
@@ -332,8 +524,8 @@ async function confirmTransactionWithRetry(connection, signature, maxRetries = 3
       if (attempt === maxRetries) {
         throw new Error(`Failed to confirm after ${maxRetries} attempts: ${error.message}`);
       }
-      console.log(`Attempt ${attempt} failed, retrying in 5 seconds...`);
-      await sleep(5000);
+      console.log(`Attempt ${attempt} failed, retrying...`);
+      await sleep(3000);
     }
   }
 }
@@ -352,21 +544,19 @@ async function getTokenDecimals(connection, mintAddress) {
 async function buyToken(tokenAddress, amountSol) {
   try {
     console.log(`\n💰 Attempting to buy token: ${tokenAddress}`);
-    console.log(`Amount to spend: ${amountSol} SOL (€${(amountSol * 135).toFixed(2)})`);
+    console.log(`💵 Amount: ${amountSol} SOL (~€${(amountSol * 135).toFixed(2)})`);
 
     const outputDecimals = await getTokenDecimals(connection, tokenAddress);
     if (outputDecimals === null) {
       throw new Error('Failed to fetch token decimals');
     }
 
-    // Get initial balance
     const initialBalance = await connection.getBalance(wallet.publicKey);
-    console.log(`Initial SOL balance: ${(initialBalance / 1e9).toFixed(4)} SOL`);
+    console.log(`💳 Current SOL balance: ${(initialBalance / 1e9).toFixed(4)} SOL`);
 
-    // Get quote from Jupiter with optimized parameters
-    const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${tokenAddress}&amount=${Math.floor(amountSol * 1e9)}&slippageBps=${OPTIMIZED_CONFIG.SLIPPAGE_BPS}`;
-    console.log(`\n🔍 Fetching optimized quote from Jupiter...`);
-
+    // Get quote from Jupiter
+    const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${tokenAddress}&amount=${Math.floor(amountSol * 1e9)}&slippageBps=${MEME_CONFIG.SLIPPAGE_BPS}`;
+    
     const quoteResponse = await fetch(quoteUrl);
     const quoteData = await quoteResponse.json();
 
@@ -375,35 +565,31 @@ async function buyToken(tokenAddress, amountSol) {
     }
 
     if (!quoteData.outAmount) {
-      throw new Error(`Invalid quote response: Missing output amount`);
+      throw new Error(`Invalid quote response`);
     }
 
     const outputAmount = Number(quoteData.outAmount) / Math.pow(10, outputDecimals);
     const priceImpact = typeof quoteData.priceImpactPct === 'number' ? 
-      quoteData.priceImpactPct : 
-      Number(quoteData.priceImpactPct);
+      quoteData.priceImpactPct : Number(quoteData.priceImpactPct);
 
-    console.log(`\n📊 Quote details:`);
-    console.log(`Input: ${amountSol} SOL | Output: ${outputAmount.toFixed(6)} tokens`);
-    console.log(`Price Impact: ${priceImpact.toFixed(4)}% | Route: ${quoteData.routePlan?.[0]?.swapInfo?.label || 'Unknown'}`);
+    console.log(`📊 Quote: ${outputAmount.toFixed(6)} tokens | Impact: ${priceImpact.toFixed(2)}% | Route: ${quoteData.routePlan?.[0]?.swapInfo?.label || 'Unknown'}`);
 
-    // Check if price impact is reasonable
-    if (priceImpact > 15) {
-      console.log(`⚠️ HIGH PRICE IMPACT: ${priceImpact.toFixed(2)}% - Skipping trade`);
+    // Check price impact
+    if (priceImpact > 12) {
+      console.log(`⚠️ Price impact too high: ${priceImpact.toFixed(2)}% - skipping`);
       return { success: false, error: 'Price impact too high' };
     }
 
-    // Get swap transaction with optimized parameters
+    // Create swap transaction
     const swapRequestBody = {
       quoteResponse: quoteData,
       userPublicKey: wallet.publicKey.toString(),
       wrapUnwrapSOL: true,
       dynamicComputeUnitLimit: true,
-      prioritizationFeeLamports: Math.floor(OPTIMIZED_CONFIG.PRIORITY_FEE_SOL * 1e9),
-      dynamicSlippage: { maxBps: OPTIMIZED_CONFIG.SLIPPAGE_BPS }
+      prioritizationFeeLamports: Math.floor(MEME_CONFIG.PRIORITY_FEE_SOL * 1e9),
+      dynamicSlippage: { maxBps: MEME_CONFIG.SLIPPAGE_BPS }
     };
 
-    console.log('\n⚡ Requesting optimized swap transaction...');
     const swapResponse = await fetch('https://quote-api.jup.ag/v6/swap', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -418,10 +604,9 @@ async function buyToken(tokenAddress, amountSol) {
     // Execute transaction
     const swapTransactionBuf = Buffer.from(swapData.swapTransaction, 'base64');
     const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-    
     transaction.sign([wallet]);
 
-    console.log('\n🚀 Sending transaction with high priority...');
+    console.log('🚀 Sending transaction...');
     const rawTransaction = transaction.serialize();
     const signature = await connection.sendRawTransaction(rawTransaction, {
       skipPreflight: true,
@@ -429,23 +614,17 @@ async function buyToken(tokenAddress, amountSol) {
       preflightCommitment: 'confirmed'
     });
 
-    console.log(`✅ Transaction sent! Signature: ${signature}`);
+    console.log(`✅ Transaction sent: ${signature}`);
     console.log(`🔍 Explorer: https://solscan.io/tx/${signature}`);
     
-    // Confirm transaction
     await confirmTransactionWithRetry(connection, signature);
     await sleep(2000);
 
-    // Get final token balance
-    let tokenAmount = await getTokenBalance(tokenAddress);
+    const tokenAmount = await getTokenBalance(tokenAddress);
     const finalBalance = await connection.getBalance(wallet.publicKey);
     const gasFee = (initialBalance - finalBalance - (amountSol * 1e9)) / 1e9;
 
-    console.log(`\n📈 Transaction summary:`);
-    console.log(`Gas fee: ${gasFee.toFixed(6)} SOL`);
-    console.log(`Priority fee: ${OPTIMIZED_CONFIG.PRIORITY_FEE_SOL} SOL`);
-    console.log(`Remaining SOL: ${(finalBalance / 1e9).toFixed(4)} SOL`);
-    console.log(`Token balance: ${tokenAmount} tokens`);
+    console.log(`✅ Purchase complete! Gas: ${gasFee.toFixed(6)} SOL | Tokens: ${tokenAmount}`);
 
     return {
       success: true,
@@ -456,129 +635,111 @@ async function buyToken(tokenAddress, amountSol) {
       outputDecimals
     };
   } catch (error) {
-    console.error('❌ Error buying token:', error.message);
-    return {
-      success: false,
-      error: error.message
-    };
+    console.error('❌ Buy error:', error.message);
+    return { success: false, error: error.message };
   }
 }
 
 // ========== ENHANCED TOKEN SELECTION ==========
-function selectBestTokensOptimized(filteredPairs) {
-  console.log('\n🎯 Optimized token selection algorithm...');
+function selectBestMemeCoins(filteredPairs) {
+  console.log('\n🎯 Intelligent meme coin selection...');
   
   const scoredPairs = filteredPairs.map(pair => {
     const createdAt = new Date(pair.pair.pairCreatedAt);
-    const now = new Date();
-    const ageInHours = (now - createdAt) / (1000 * 60 * 60);
+    const ageInHours = (new Date() - createdAt) / (1000 * 60 * 60);
 
     const marketCap = pair.marketCap || 0;
     const liquidity = pair.pair.liquidity?.usd || 0;
     const volume24h = pair.pair.volume?.h24 || 0;
     const volume5m = pair.pair.volume?.m5 || 0;
 
-    // Enhanced scoring algorithm
-    const marketCapPerHour = marketCap / Math.max(ageInHours, 0.1);
-    const liquidityPerHour = liquidity / Math.max(ageInHours, 0.1);
-    const volumePerHour = volume24h / Math.min(ageInHours, 24);
-    const recentVolumeScore = volume5m * 12; // 5min volume * 12 = hourly estimate
-
-    // New factors
-    const liquidityRatio = liquidity / marketCap; // Higher is better for trading
-    const ageBonus = ageInHours < 2 ? 1.5 : 1; // Bonus for very new tokens
-    const volumeConsistency = volume5m > 0 ? 1.2 : 0.8; // Recent activity bonus
-
-    const score = (
-      (marketCapPerHour * 0.25) +
-      (liquidityPerHour * 0.25) +
-      (volumePerHour * 0.20) +
-      (recentVolumeScore * 0.15) +
-      (liquidityRatio * 10000 * 0.10) + // Normalized liquidity ratio
-      (ageBonus * 1000 * 0.05)
-    ) * volumeConsistency;
+    // Advanced scoring for meme coins
+    const momentumScore = volume5m * 12; // Recent activity
+    const liquidityScore = liquidity / Math.max(marketCap, 1) * 100; // Liquidity ratio
+    const ageScore = ageInHours < 3 ? 2.0 : ageInHours < 12 ? 1.5 : 1.0; // Fresh bonus
+    const volumeScore = volume24h / Math.max(ageInHours, 1); // Volume per hour
+    
+    const totalScore = (
+      (momentumScore * 0.30) +      // Recent momentum is key
+      (liquidityScore * 0.25) +     // Good liquidity for exits
+      (volumeScore * 0.25) +        // Sustained activity
+      (marketCap * 0.15) +          // Size matters
+      (ageScore * 1000 * 0.05)      // Fresh coin bonus
+    );
 
     return {
       ...pair,
       ageInHours,
-      score,
-      marketCapPerHour,
-      liquidityPerHour,
-      volumePerHour,
-      liquidityRatio,
-      ageBonus,
-      volumeConsistency
+      totalScore,
+      momentumScore,
+      liquidityScore,
+      ageScore,
+      volumeScore
     };
   });
 
   const topPairs = scoredPairs
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 3); // Reduced to top 3 for better quality
+    .sort((a, b) => b.totalScore - a.totalScore)
+    .slice(0, 3);
 
-  console.log('\n🏆 Top 3 optimized token candidates:');
+  console.log('\n🏆 Top 3 meme coin candidates:');
   topPairs.forEach((pair, index) => {
-    const createdAt = new Date(pair.pair.pairCreatedAt);
-    const ageText = pair.ageInHours < 1 
-      ? `${Math.round(pair.ageInHours * 60)}min` 
-      : `${Math.round(pair.ageInHours)}h`;
+    const ageText = pair.ageInHours < 1 ? 
+      `${Math.round(pair.ageInHours * 60)}min` : 
+      `${pair.ageInHours.toFixed(1)}h`;
     
     console.log(`\n${index + 1}. ${pair.pair.baseToken.name || 'Unknown'} (${pair.pair.baseToken.symbol})`);
-    console.log(`   Age: ${ageText} | Score: ${Math.round(pair.score)}`);
+    console.log(`   Age: ${ageText} | Score: ${Math.round(pair.totalScore)}`);
     console.log(`   MC: $${pair.marketCap.toLocaleString()} | Liq: $${pair.pair.liquidity?.usd?.toLocaleString() || '0'}`);
-    console.log(`   Vol 24h: $${pair.pair.volume?.h24?.toLocaleString() || '0'} | Vol 5m: $${pair.pair.volume?.m5?.toLocaleString() || '0'}`);
-    console.log(`   Liq Ratio: ${(pair.liquidityRatio * 100).toFixed(2)}%`);
-    console.log(`   Address: ${pair.token.tokenAddress.slice(0,8)}...`);
+    console.log(`   Vol 24h: $${pair.pair.volume?.h24?.toLocaleString() || '0'} | 5m: $${pair.pair.volume?.m5?.toLocaleString() || '0'}`);
+    console.log(`   Momentum: ${Math.round(pair.momentumScore)} | Liq Ratio: ${pair.liquidityScore.toFixed(2)}%`);
   });
 
   return topPairs;
 }
 
-// ========== MAIN ENHANCED PROCESS ==========
-async function processNewTokenOptimized(retryCount = 0, topTokens = null) {
+// ========== MAIN TRADING PROCESS ==========
+async function processIntelligentTrading(retryCount = 0, topTokens = null) {
   try {
-    console.log(`\n🚀 OPTIMIZED Trading Cycle ${retryCount + 1} - ${new Date().toLocaleString()}`);
+    console.log(`\n🤖 INTELLIGENT MEME TRADING - Cycle ${retryCount + 1}`);
+    console.log(`⏰ ${new Date().toLocaleString()} | UTC Hour: ${getCurrentHourUTC()}`);
     
-    // Check if it's active trading time
-    if (!isActiveTradingTime()) {
-      console.log(`⏰ Outside active trading hours (${getCurrentHourUTC()}:00 UTC) - skipping`);
-      return;
-    }
-    
-    // Check risk limits
+    // Check risk limits first
     const riskCheckPassed = await checkRiskLimits();
     if (!riskCheckPassed) {
-      console.log('🛑 Risk limits exceeded - skipping trading cycle');
+      console.log('🛑 Risk check failed - pausing trading');
       return;
     }
     
-    // Perform portfolio cleanup every 5th cycle
-    if (retryCount % 5 === 0 && portfolioTracker.size > 0) {
-      await performPortfolioCleanup();
+    // Portfolio management every 3rd cycle
+    if (retryCount % 3 === 0 && portfolioTracker.size > 0) {
+      await performIntelligentPortfolioManagement();
     }
     
-    // Fetch new tokens only if we don't have topTokens from previous attempt
+    // Fetch new tokens if needed
     if (!topTokens) {
-      console.log('🔍 Fetching latest token data from DexScreener...');
+      console.log('🔍 Scanning for fresh meme coins...');
       const url = 'https://api.dexscreener.com/token-profiles/latest/v1';
 
       const response = await fetch(url);
       const jsonData = await response.json();
 
       if (!Array.isArray(jsonData) || jsonData.length === 0) {
-        console.error("❌ No valid token data found");
+        console.error("❌ No token data found");
         return;
       }
 
       let allPairs = [];
-      console.log(`📊 Processing ${jsonData.length} potential tokens...`);
+      console.log(`📊 Analyzing ${jsonData.length} potential meme coins...`);
 
       for (const token of jsonData) {
-        if (postedTokens.has(token.tokenAddress)) continue;
-        if (portfolioTracker.has(token.tokenAddress)) continue; // Skip tokens we already own
+        // Skip if already processed or owned
+        if (postedTokens.has(token.tokenAddress) || portfolioTracker.has(token.tokenAddress)) {
+          continue;
+        }
 
-        const searchUrl = `https://api.dexscreener.com/latest/dex/search?q=${token.tokenAddress}`;
-        
         try {
+          const searchUrl = `https://api.dexscreener.com/latest/dex/search?q=${token.tokenAddress}`;
           const searchResponse = await fetch(searchUrl);
           const searchResult = await searchResponse.json();
 
@@ -590,144 +751,154 @@ async function processNewTokenOptimized(retryCount = 0, topTokens = null) {
             });
           }
         } catch (error) {
-          console.log(`Skipping token due to fetch error: ${token.tokenAddress.slice(0,8)}...`);
+          // Skip problematic tokens
+          continue;
         }
       }
 
-      // Apply optimized filters
+      // Apply intelligent filters
       let filteredPairs = allPairs.filter(item => {
-        return item.marketCap >= OPTIMIZED_CONFIG.MIN_MARKET_CAP && 
-               item.marketCap <= OPTIMIZED_CONFIG.MAX_MARKET_CAP &&
-               item.pair.liquidity?.usd > 10000; // Minimum liquidity requirement
+        return item.marketCap >= MEME_CONFIG.MIN_MARKET_CAP && 
+               item.marketCap <= MEME_CONFIG.MAX_MARKET_CAP &&
+               (item.pair.liquidity?.usd || 0) >= MEME_CONFIG.MIN_LIQUIDITY;
       });
 
-      console.log(`✅ Found ${filteredPairs.length} tokens matching optimized criteria`);
+      console.log(`✅ ${filteredPairs.length} meme coins passed filters`);
 
       if (filteredPairs.length === 0) {
-        console.log("📊 No tokens found with suitable criteria - waiting for next cycle");
+        console.log("📊 No suitable meme coins found - waiting for next cycle");
         return;
       }
 
-      // Get top tokens using optimized selection
-      topTokens = selectBestTokensOptimized(filteredPairs);
+      topTokens = selectBestMemeCoins(filteredPairs);
       if (!topTokens || topTokens.length === 0) {
-        console.log("🎯 No suitable tokens selected after optimization");
+        console.log("🎯 No tokens selected after analysis");
         return;
       }
     }
 
-    // Try to buy the next available token from top tokens
+    // Select token to buy
     const currentTokenIndex = retryCount % topTokens.length;
     const selectedToken = topTokens[currentTokenIndex];
 
-    console.log(`\n🎯 Attempting to buy: ${selectedToken.pair.baseToken.name}`);
-    console.log(`📊 Token metrics: MC $${selectedToken.marketCap.toLocaleString()} | Score: ${Math.round(selectedToken.score)}`);
+    console.log(`\n🎯 Selected: ${selectedToken.pair.baseToken.name}`);
+    console.log(`📊 MC: $${selectedToken.marketCap.toLocaleString()} | Score: ${Math.round(selectedToken.totalScore)}`);
 
-    // Buy the token with optimized amount
-    const purchaseResult = await buyToken(selectedToken.token.tokenAddress, OPTIMIZED_CONFIG.AMOUNT_TO_SPEND);
+    // Execute purchase
+    const purchaseResult = await buyToken(selectedToken.token.tokenAddress, MEME_CONFIG.AMOUNT_TO_SPEND);
 
     if (!purchaseResult.success) {
-      console.log(`❌ Failed to purchase token: ${purchaseResult.error}`);
+      console.log(`❌ Purchase failed: ${purchaseResult.error}`);
       
-      // If we haven't tried all tokens yet, retry with next token
       if (retryCount < topTokens.length * 2) {
-        console.log(`🔄 Retrying with different token (Attempt ${retryCount + 2})...`);
+        console.log(`🔄 Trying next token...`);
         await sleep(3000);
-        return processNewTokenOptimized(retryCount + 1, topTokens);
+        return processIntelligentTrading(retryCount + 1, topTokens);
       } else {
-        console.log('⚠️ Exceeded maximum retry attempts. Waiting for next cycle.');
+        console.log('⚠️ Max retries reached');
         return;
       }
     }
 
-    // Add to portfolio tracker
+    // Add to intelligent portfolio tracker
     const currentPrice = await getTokenPrice(selectedToken.token.tokenAddress);
     portfolioTracker.set(selectedToken.token.tokenAddress, {
       tokenName: selectedToken.pair.baseToken.name,
       tokenSymbol: selectedToken.pair.baseToken.symbol,
       entryDate: new Date(),
       entryPrice: currentPrice,
-      amountSol: OPTIMIZED_CONFIG.AMOUNT_TO_SPEND,
+      entryPnL: 0,
+      highestPnL: 0,
+      highestPnLDate: new Date(),
+      amountSol: MEME_CONFIG.AMOUNT_TO_SPEND,
       tokenAmount: purchaseResult.tokenAmount,
       decimals: purchaseResult.outputDecimals,
       signature: purchaseResult.signature,
       gasFee: purchaseResult.gasFee,
-      priceImpact: purchaseResult.priceImpact
+      priceImpact: purchaseResult.priceImpact,
+      currentStopLoss: null,
+      stopReason: 'Grace period active'
     });
 
-    // Update performance tracking
+    // Update counters
     totalTrades++;
-    logPerformance('BUY', selectedToken.token.tokenAddress, selectedToken.pair.baseToken.name, currentPrice, currentPrice, 0);
+    incrementDailyTradeCount();
+    
+    logPerformance('BUY', selectedToken.token.tokenAddress, 
+      selectedToken.pair.baseToken.name, currentPrice, currentPrice, 0, {
+        marketCap: selectedToken.marketCap,
+        totalScore: selectedToken.totalScore,
+        tradeNumber: totalTrades
+      });
 
-    // Generate and send tweet (if enabled)
+    // Generate tweet if configured
     if (SECRETS.CHATGPT_API_KEY && SECRETS.APP_KEY) {
       try {
-        const purchaseInfo = `${Math.floor(purchaseResult.tokenAmount)}`;
-        const prompt = `You are "Milo", an AI trading bot. You just bought ${selectedToken.pair.baseToken.name} (${purchaseInfo} ${selectedToken.pair.baseToken.symbol}). Write a short tweet about this purchase - be confident but not overhyped. Include the token name and amount. Keep it under 200 characters and professional.`;
+        const prompt = `You are Milo, an AI trading bot. You just bought ${selectedToken.pair.baseToken.name} (${Math.floor(purchaseResult.tokenAmount)} ${selectedToken.pair.baseToken.symbol}). Write a confident but not overhyped tweet about this meme coin purchase. Keep it under 200 characters and professional.`;
        
         const chatResponse = await chatGPT.sendMessage(prompt);
         let tweetText = `${chatResponse.text}\n\n${selectedToken.pair.url}`;
 
         if (tweetText.length > 280) {
-          tweetText = `Just bought ${purchaseInfo} ${selectedToken.pair.baseToken.symbol} - ${selectedToken.pair.baseToken.name}. Smart money moves. 🚀\n\n${selectedToken.pair.url}`;
+          tweetText = `Acquired ${Math.floor(purchaseResult.tokenAmount)} ${selectedToken.pair.baseToken.symbol} - ${selectedToken.pair.baseToken.name}. Intelligent selection based on momentum and liquidity analysis. 🎯\n\n${selectedToken.pair.url}`;
         }
 
-        console.log("\n🐦 Generated Tweet:", tweetText);
+        console.log("\n🐦 Posting tweet:", tweetText);
         await twitterClient.v2.tweet(tweetText);
-        console.log("✅ Tweet sent successfully!");
+        console.log("✅ Tweet posted successfully!");
       } catch (error) {
-        console.log("❌ Tweet generation/sending failed:", error.message);
+        console.log("❌ Tweet failed:", error.message);
       }
     }
 
     postedTokens.add(selectedToken.token.tokenAddress);
     
-    console.log(`\n🎉 SUCCESS! Token purchase completed`);
-    console.log(`📊 Portfolio size: ${portfolioTracker.size} positions`);
-    console.log(`📈 Total trades: ${totalTrades} | Win rate: ${(winnigTrades/totalTrades*100).toFixed(1)}%`);
+    console.log(`\n🎉 PURCHASE COMPLETE!`);
+    console.log(`📊 Portfolio: ${portfolioTracker.size} positions | Daily: ${dailyTradeCount.get(getTodayKey()) || 0}/${MEME_CONFIG.MAX_DAILY_TRADES}`);
+    console.log(`📈 Win Rate: ${totalTrades > 0 ? (winningTrades/totalTrades*100).toFixed(1) : 0}% (${winningTrades}/${totalTrades})`);
 
   } catch (error) {
-    console.error('❌ Error in optimized trading process:', error.message);
+    console.error('❌ Trading process error:', error.message);
     
-    // Retry on error if we haven't exceeded retry limit
-    if (retryCount < 5) {
-      console.log(`🔄 Retrying due to error (Attempt ${retryCount + 2})...`);
+    if (retryCount < 3) {
+      console.log(`🔄 Retrying... (${retryCount + 2})`);
       await sleep(5000);
-      return processNewTokenOptimized(retryCount + 1, topTokens);
+      return processIntelligentTrading(retryCount + 1, topTokens);
     }
   }
 }
 
-// ========== ENHANCED STARTUP ==========
-async function startOptimizedMilo() {
-  console.log('\n🤖 STARTING OPTIMIZED MILO TRADING BOT');
-  console.log('=========================================');
-  console.log(`💰 Trade Size: ${OPTIMIZED_CONFIG.AMOUNT_TO_SPEND} SOL (~€${(OPTIMIZED_CONFIG.AMOUNT_TO_SPEND * 135).toFixed(2)})`);
-  console.log(`📊 Max Positions: ${OPTIMIZED_CONFIG.MAX_POSITIONS}`);
-  console.log(`⚡ Slippage: ${OPTIMIZED_CONFIG.SLIPPAGE_BPS/100}% | Priority Fee: ${OPTIMIZED_CONFIG.PRIORITY_FEE_SOL} SOL`);
-  console.log(`🎯 Market Cap Range: $${OPTIMIZED_CONFIG.MIN_MARKET_CAP.toLocaleString()} - $${OPTIMIZED_CONFIG.MAX_MARKET_CAP.toLocaleString()}`);
-  console.log(`⏰ Active Hours: ${OPTIMIZED_CONFIG.ACTIVE_HOURS.join(', ')} UTC`);
-  console.log('=========================================\n');
+// ========== STARTUP ==========
+async function startIntelligentMiloBot() {
+  console.log('\n🤖 STARTING INTELLIGENT MILO 2.0');
+  console.log('=====================================');
+  console.log(`💰 Trade Size: ${MEME_CONFIG.AMOUNT_TO_SPEND} SOL (~€${(MEME_CONFIG.AMOUNT_TO_SPEND * 135).toFixed(2)})`);
+  console.log(`📊 Max Positions: ${MEME_CONFIG.MAX_POSITIONS} | Daily Limit: ${MEME_CONFIG.MAX_DAILY_TRADES}`);
+  console.log(`⚡ Slippage: ${MEME_CONFIG.SLIPPAGE_BPS/100}% | Priority: ${MEME_CONFIG.PRIORITY_FEE_SOL} SOL`);
+  console.log(`🎯 MC Range: $${MEME_CONFIG.MIN_MARKET_CAP.toLocaleString()} - $${MEME_CONFIG.MAX_MARKET_CAP.toLocaleString()}`);
+  console.log(`🛡️ Intelligent Trailing Stops: Grace ${MEME_CONFIG.TRAILING_STOP.GRACE_PERIOD_HOURS}h | Initial ${MEME_CONFIG.TRAILING_STOP.INITIAL_STOP_PERCENT}%`);
+  console.log(`⏰ 24/7 Trading: Active | Weekend Buffer: +${(MEME_CONFIG.TRAILING_STOP.WEEKEND_MULTIPLIER-1)*100}%`);
+  console.log('=====================================\n');
   
-  // Initial wallet check
+  // Wallet status
   const initialBalance = await connection.getBalance(wallet.publicKey) / 1e9;
-  console.log(`💳 Current SOL Balance: ${initialBalance.toFixed(4)} SOL`);
-  console.log(`🚀 Wallet Address: ${wallet.publicKey.toString()}`);
+  console.log(`💳 SOL Balance: ${initialBalance.toFixed(4)} SOL`);
+  console.log(`🔑 Wallet: ${wallet.publicKey.toString()}`);
   
-  if (initialBalance < OPTIMIZED_CONFIG.MIN_WALLET_RESERVE) {
-    console.log(`⚠️ WARNING: Low balance! Minimum recommended: ${OPTIMIZED_CONFIG.MIN_WALLET_RESERVE} SOL`);
+  if (initialBalance < MEME_CONFIG.MIN_WALLET_RESERVE) {
+    console.log(`⚠️ LOW BALANCE WARNING! Minimum: ${MEME_CONFIG.MIN_WALLET_RESERVE} SOL`);
   }
   
-  // Start the enhanced trading loop
-  const ENHANCED_INTERVAL = 12 * 60 * 1000; // 12 minutes for better timing
-  console.log(`⏱️ Trading cycle: Every ${ENHANCED_INTERVAL/60000} minutes`);
+  // Start trading
+  const CYCLE_INTERVAL = 12 * 60 * 1000; // 12 minutes
+  console.log(`⏱️ Cycle interval: ${CYCLE_INTERVAL/60000} minutes\n`);
   
-  // Run immediately
-  processNewTokenOptimized();
+  // First run
+  processIntelligentTrading();
   
-  // Then run on interval
-  setInterval(processNewTokenOptimized, ENHANCED_INTERVAL);
+  // Scheduled runs
+  setInterval(processIntelligentTrading, CYCLE_INTERVAL);
 }
 
-// ========== START THE OPTIMIZED BOT ==========
-startOptimizedMilo();
+// ========== LAUNCH BOT ==========
+startIntelligentMiloBot();
