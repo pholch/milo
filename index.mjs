@@ -4,59 +4,75 @@ import { Keypair } from '@solana/web3.js';
 import { ChatGPTAPI } from 'chatgpt';
 import { TwitterApi } from 'twitter-api-v2';
 import bs58 from 'bs58';
+import fs from 'fs/promises';
+import path from 'path';
+import http from 'http';
 import SECRETS from './SECRETS.js';
 import config from './config.js';
 
 // ========== INTELLIGENT MEME COIN CONFIGURATION ==========
 const MEME_CONFIG = {
   // Trading Parameters
-  AMOUNT_TO_SPEND: 0.006, // €8.10 per trade
-  SLIPPAGE_BPS: 2000, // 20% slippage for meme coins
-  PRIORITY_FEE_SOL: 0.0015, // High priority for fast execution
+  AMOUNT_TO_SPEND: 0.006,
+  SLIPPAGE_BPS: 2000,
+  PRIORITY_FEE_SOL: 0.0015,
   
   // Portfolio Management
-  MAX_POSITIONS: 20, // Maximum different tokens
-  MIN_POSITION_VALUE_EUR: 1.50, // Cleanup very small positions
+  MAX_POSITIONS: 20,
+  MIN_POSITION_VALUE_EUR: 1.50,
   
   // Intelligent Trailing Stop-Loss System
   TRAILING_STOP: {
-    // Initial grace period - no stop loss for new positions
-    GRACE_PERIOD_HOURS: 6, // Let meme coins develop for 6 hours
-    
-    // Initial stop-loss after grace period
-    INITIAL_STOP_PERCENT: -70, // -70% stop loss after grace period
-    
-    // Trailing stop levels - when to move stop loss up
+    GRACE_PERIOD_HOURS: 6,
+    INITIAL_STOP_PERCENT: -70,
     LEVELS: [
-      { profitThreshold: 30, stopLoss: -10 },   // At +30%, stop at -10%
-      { profitThreshold: 80, stopLoss: 20 },    // At +80%, stop at +20%
-      { profitThreshold: 150, stopLoss: 60 },   // At +150%, stop at +60%
-      { profitThreshold: 300, stopLoss: 120 },  // At +300%, stop at +120%
-      { profitThreshold: 600, stopLoss: 250 },  // At +600%, stop at +250%
-      { profitThreshold: 1000, stopLoss: 400 }, // At +1000%, stop at +400%
-      { profitThreshold: 2000, stopLoss: 800 }  // At +2000%, stop at +800%
+      { profitThreshold: 30, stopLoss: -10 },
+      { profitThreshold: 80, stopLoss: 20 },
+      { profitThreshold: 150, stopLoss: 60 },
+      { profitThreshold: 300, stopLoss: 120 },
+      { profitThreshold: 600, stopLoss: 250 },
+      { profitThreshold: 1000, stopLoss: 400 },
+      { profitThreshold: 2000, stopLoss: 800 }
     ],
-    
-    // Volatility buffer - don't trigger on small dips
-    VOLATILITY_BUFFER: 15, // Allow 15% dip from peak before triggering
-    
-    // Time-based adjustments
-    WEEKEND_MULTIPLIER: 1.3, // 30% more buffer on weekends (less liquidity)
-    NIGHT_MULTIPLIER: 1.2,   // 20% more buffer during night hours (low volume)
+    VOLATILITY_BUFFER: 15,
+    WEEKEND_MULTIPLIER: 1.3,
+    NIGHT_MULTIPLIER: 1.2,
   },
   
   // Market Cap Filters
-  MIN_MARKET_CAP: 50000, // $50k minimum
-  MAX_MARKET_CAP: 1000000, // $1M maximum
-  MIN_LIQUIDITY: 15000, // $15k minimum liquidity
+  MIN_MARKET_CAP: 50000,
+  MAX_MARKET_CAP: 1000000,
+  MIN_LIQUIDITY: 15000,
   
   // Performance Tracking
   PERFORMANCE_LOG_ENABLED: true,
-  TARGET_WIN_RATE: 45, // Target 45% win rate
+  TARGET_WIN_RATE: 45,
   
   // Risk Management
-  MIN_WALLET_RESERVE: 0.05, // Keep 0.05 SOL for fees
-  MAX_DAILY_TRADES: 10, // Limit daily trades to prevent overtrading
+  MIN_WALLET_RESERVE: 0.05,
+  MAX_DAILY_TRADES: 10,
+  
+  // Professional Logging System
+  LOGGING: {
+    SNAPSHOT_INTERVAL_MINUTES: 15,
+    BACKUP_RETENTION_DAYS: 30,
+    MAX_LOG_FILE_SIZE_MB: 50,
+    SOL_PRICE_TRACKING: true,
+    GAS_FEE_TRACKING: true,
+    FAILED_TX_LOGGING: true
+  }
+};
+
+// ========== LOGGING SYSTEM SETUP ==========
+const LOG_DIR = './logs';
+const BACKUP_DIR = './logs/backups';
+const LOG_FILES = {
+  TRANSACTIONS: path.join(LOG_DIR, 'transactions.json'),
+  PORTFOLIO: path.join(LOG_DIR, 'portfolio.json'),
+  SNAPSHOTS: path.join(LOG_DIR, 'portfolio_snapshots.json'),
+  DAILY_SUMMARY: path.join(LOG_DIR, 'daily_summary.json'),
+  FAILED_TRANSACTIONS: path.join(LOG_DIR, 'failed_transactions.json'),
+  GAS_TRACKER: path.join(LOG_DIR, 'gas_tracker.json')
 };
 
 // ========== CONNECTION SETUP ==========
@@ -81,11 +97,12 @@ const chatGPT = new ChatGPTAPI({
 
 // ========== GLOBAL STATE ==========
 const postedTokens = new Set();
-const portfolioTracker = new Map(); // Enhanced position tracking
+const portfolioTracker = new Map();
 const performanceLog = [];
-const dailyTradeCount = new Map(); // Track daily trades
+const dailyTradeCount = new Map();
 let totalTrades = 0;
 let winningTrades = 0;
+let currentSolPrice = 135; // Will be updated
 
 // ========== WALLET SETUP ==========
 let privateKeyArray;
@@ -95,6 +112,354 @@ try {
   privateKeyArray = Array.from(bs58.decode(config.PRIVATE_KEY));
 }
 const wallet = Keypair.fromSecretKey(new Uint8Array(privateKeyArray));
+
+// ========== PROFESSIONAL LOGGING SYSTEM ==========
+
+// Initialize logging directories
+async function initializeLogging() {
+  try {
+    await fs.mkdir(LOG_DIR, { recursive: true });
+    await fs.mkdir(BACKUP_DIR, { recursive: true });
+    console.log('📁 Logging system initialized');
+    
+    // Initialize empty log files if they don't exist
+    for (const [name, filePath] of Object.entries(LOG_FILES)) {
+      try {
+        await fs.access(filePath);
+      } catch {
+        if (name === 'SNAPSHOTS') {
+          await fs.writeFile(filePath, JSON.stringify({ snapshots: [] }, null, 2));
+        } else {
+          await fs.writeFile(filePath, JSON.stringify([], null, 2));
+        }
+        console.log(`📝 Created ${name.toLowerCase()}.json`);
+      }
+    }
+  } catch (error) {
+    console.error('❌ Logging initialization failed:', error.message);
+  }
+}
+
+// Get current SOL price
+async function updateSolPrice() {
+  try {
+    const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=eur');
+    const data = await response.json();
+    currentSolPrice = data.solana?.eur || 135;
+    return currentSolPrice;
+  } catch (error) {
+    console.error('Error fetching SOL price:', error.message);
+    return currentSolPrice;
+  }
+}
+
+// Log transaction
+async function logTransaction(transactionData) {
+  try {
+    const transactions = JSON.parse(await fs.readFile(LOG_FILES.TRANSACTIONS, 'utf8'));
+    
+    const logEntry = {
+      id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: new Date().toISOString(),
+      sol_price_eur: currentSolPrice,
+      ...transactionData
+    };
+    
+    transactions.push(logEntry);
+    
+    await fs.writeFile(LOG_FILES.TRANSACTIONS, JSON.stringify(transactions, null, 2));
+    console.log(`📝 Transaction logged: ${transactionData.action} ${transactionData.token_name}`);
+    
+    // Check file size and rotate if needed
+    await rotateLogFileIfNeeded(LOG_FILES.TRANSACTIONS);
+    
+  } catch (error) {
+    console.error('❌ Transaction logging failed:', error.message);
+  }
+}
+
+// Log failed transaction
+async function logFailedTransaction(failedTxData) {
+  if (!MEME_CONFIG.LOGGING.FAILED_TX_LOGGING) return;
+  
+  try {
+    const failedTxs = JSON.parse(await fs.readFile(LOG_FILES.FAILED_TRANSACTIONS, 'utf8'));
+    
+    const logEntry = {
+      id: `fail_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: new Date().toISOString(),
+      sol_price_eur: currentSolPrice,
+      ...failedTxData
+    };
+    
+    failedTxs.push(logEntry);
+    await fs.writeFile(LOG_FILES.FAILED_TRANSACTIONS, JSON.stringify(failedTxs, null, 2));
+    console.log(`📝 Failed transaction logged: ${failedTxData.error}`);
+    
+  } catch (error) {
+    console.error('❌ Failed transaction logging error:', error.message);
+  }
+}
+
+// Log gas fees
+async function logGasFee(gasData) {
+  if (!MEME_CONFIG.LOGGING.GAS_FEE_TRACKING) return;
+  
+  try {
+    const gasTracker = JSON.parse(await fs.readFile(LOG_FILES.GAS_TRACKER, 'utf8'));
+    
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      gas_fee_sol: gasData.gasFee,
+      gas_fee_eur: gasData.gasFee * currentSolPrice,
+      priority_fee_sol: gasData.priorityFee || MEME_CONFIG.PRIORITY_FEE_SOL,
+      transaction_type: gasData.type,
+      signature: gasData.signature,
+      network_congestion: gasData.congestion || 'unknown'
+    };
+    
+    gasTracker.push(logEntry);
+    await fs.writeFile(LOG_FILES.GAS_TRACKER, JSON.stringify(gasTracker, null, 2));
+    
+  } catch (error) {
+    console.error('❌ Gas tracking failed:', error.message);
+  }
+}
+
+// Update current portfolio status
+async function updatePortfolioLog() {
+  try {
+    await updatePortfolioTracker();
+    
+    const positions = Array.from(portfolioTracker.entries()).map(([address, position]) => ({
+      token_address: address,
+      token_name: position.tokenName,
+      token_symbol: position.tokenSymbol,
+      entry_date: position.entryDate.toISOString(),
+      entry_price: position.entryPrice,
+      current_price: position.currentPrice,
+      amount_invested_sol: position.amountSol,
+      amount_invested_eur: position.amountSol * currentSolPrice,
+      current_value_sol: position.currentValue / currentSolPrice,
+      current_value_eur: position.currentValue * currentSolPrice,
+      token_amount: position.tokenAmount,
+      pnl_percent: position.pnlPercent,
+      pnl_absolute_sol: (position.currentValue / currentSolPrice) - position.amountSol,
+      pnl_absolute_eur: ((position.currentValue / currentSolPrice) - position.amountSol) * currentSolPrice,
+      hold_time: position.holdTime,
+      highest_pnl: position.highestPnL || position.pnlPercent,
+      current_stop_loss: position.currentStopLoss,
+      stop_reason: position.stopReason,
+      last_updated: position.lastUpdated?.toISOString()
+    }));
+    
+    const totalInvested = Array.from(portfolioTracker.values())
+      .reduce((sum, pos) => sum + pos.amountSol, 0);
+    
+    const totalCurrentValue = Array.from(portfolioTracker.values())
+      .reduce((sum, pos) => sum + (pos.currentValue / currentSolPrice), 0);
+    
+    const totalPnLPercent = totalInvested > 0 ? 
+      ((totalCurrentValue - totalInvested) / totalInvested) * 100 : 0;
+    
+    const portfolioData = {
+      last_updated: new Date().toISOString(),
+      sol_price_eur: currentSolPrice,
+      total_positions: portfolioTracker.size,
+      total_investment_sol: totalInvested,
+      total_investment_eur: totalInvested * currentSolPrice,
+      current_portfolio_value_sol: totalCurrentValue,
+      current_portfolio_value_eur: totalCurrentValue * currentSolPrice,
+      total_pnl_percent: totalPnLPercent,
+      total_pnl_absolute_sol: totalCurrentValue - totalInvested,
+      total_pnl_absolute_eur: (totalCurrentValue - totalInvested) * currentSolPrice,
+      win_rate: totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0,
+      total_trades: totalTrades,
+      winning_trades: winningTrades,
+      positions: positions
+    };
+    
+    await fs.writeFile(LOG_FILES.PORTFOLIO, JSON.stringify(portfolioData, null, 2));
+    console.log(`📊 Portfolio updated: ${portfolioTracker.size} positions, ${totalPnLPercent.toFixed(2)}% P&L`);
+    
+  } catch (error) {
+    console.error('❌ Portfolio logging failed:', error.message);
+  }
+}
+
+// Create 15-minute portfolio snapshots
+async function createPortfolioSnapshot() {
+  try {
+    const snapshots = JSON.parse(await fs.readFile(LOG_FILES.SNAPSHOTS, 'utf8'));
+    
+    await updatePortfolioTracker();
+    await updateSolPrice();
+    
+    const positions = Array.from(portfolioTracker.entries()).map(([address, position]) => {
+      const ageMinutes = (new Date() - position.entryDate) / (1000 * 60);
+      return {
+        token_address: address.slice(0, 8) + '...',
+        token_name: position.tokenName,
+        token_symbol: position.tokenSymbol,
+        price_usd: position.currentPrice,
+        value_sol: position.currentValue / currentSolPrice,
+        value_eur: position.currentValue * currentSolPrice,
+        pnl_percent: position.pnlPercent,
+        age_minutes: Math.round(ageMinutes),
+        highest_pnl: position.highestPnL || position.pnlPercent,
+        current_stop_loss: position.currentStopLoss
+      };
+    });
+    
+    const totalInvested = Array.from(portfolioTracker.values())
+      .reduce((sum, pos) => sum + pos.amountSol, 0);
+    
+    const totalCurrentValue = Array.from(portfolioTracker.values())
+      .reduce((sum, pos) => sum + (pos.currentValue / currentSolPrice), 0);
+    
+    const snapshot = {
+      timestamp: new Date().toISOString(),
+      sol_price_eur: currentSolPrice,
+      total_portfolio_value_sol: totalCurrentValue,
+      total_portfolio_value_eur: totalCurrentValue * currentSolPrice,
+      total_invested_sol: totalInvested,
+      total_invested_eur: totalInvested * currentSolPrice,
+      pnl_percent: totalInvested > 0 ? ((totalCurrentValue - totalInvested) / totalInvested) * 100 : 0,
+      pnl_absolute_sol: totalCurrentValue - totalInvested,
+      pnl_absolute_eur: (totalCurrentValue - totalInvested) * currentSolPrice,
+      active_positions: portfolioTracker.size,
+      total_trades_today: dailyTradeCount.get(getTodayKey()) || 0,
+      overall_win_rate: totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0,
+      positions: positions
+    };
+    
+    snapshots.snapshots.push(snapshot);
+    
+    // Keep only last 672 snapshots (7 days * 24 hours * 4 snapshots per hour)
+    if (snapshots.snapshots.length > 672) {
+      snapshots.snapshots = snapshots.snapshots.slice(-672);
+    }
+    
+    await fs.writeFile(LOG_FILES.SNAPSHOTS, JSON.stringify(snapshots, null, 2));
+    console.log(`📸 Portfolio snapshot created: ${portfolioTracker.size} positions, €${(totalCurrentValue * currentSolPrice).toFixed(2)}`);
+    
+  } catch (error) {
+    console.error('❌ Snapshot creation failed:', error.message);
+  }
+}
+
+// Generate daily summary
+async function generateDailySummary() {
+  try {
+    const today = getTodayKey();
+    const transactions = JSON.parse(await fs.readFile(LOG_FILES.TRANSACTIONS, 'utf8'));
+    
+    // Filter today's transactions
+    const todayTx = transactions.filter(tx => 
+      tx.timestamp.startsWith(today)
+    );
+    
+    const buyTx = todayTx.filter(tx => tx.action === 'BUY');
+    const sellTx = todayTx.filter(tx => tx.action === 'SELL');
+    
+    const winningTx = sellTx.filter(tx => tx.pnl_percent > 0);
+    const losingTx = sellTx.filter(tx => tx.pnl_percent <= 0);
+    
+    const totalInvested = buyTx.reduce((sum, tx) => sum + tx.amount_sol, 0);
+    const totalReturned = sellTx.reduce((sum, tx) => sum + (tx.amount_sol * (1 + tx.pnl_percent / 100)), 0);
+    
+    const bestPerformer = sellTx.length > 0 ? 
+      sellTx.reduce((best, tx) => tx.pnl_percent > best.pnl_percent ? tx : best) : null;
+    
+    const worstPerformer = sellTx.length > 0 ? 
+      sellTx.reduce((worst, tx) => tx.pnl_percent < worst.pnl_percent ? tx : worst) : null;
+    
+    const summary = {
+      date: today,
+      timestamp: new Date().toISOString(),
+      sol_price_eur: currentSolPrice,
+      trades_count: todayTx.length,
+      buy_trades: buyTx.length,
+      sell_trades: sellTx.length,
+      winning_trades: winningTx.length,
+      losing_trades: losingTx.length,
+      win_rate: sellTx.length > 0 ? (winningTx.length / sellTx.length) * 100 : 0,
+      total_invested_sol: totalInvested,
+      total_invested_eur: totalInvested * currentSolPrice,
+      total_returned_sol: totalReturned,
+      total_returned_eur: totalReturned * currentSolPrice,
+      net_profit_sol: totalReturned - totalInvested,
+      net_profit_eur: (totalReturned - totalInvested) * currentSolPrice,
+      net_profit_percent: totalInvested > 0 ? ((totalReturned - totalInvested) / totalInvested) * 100 : 0,
+      best_performer: bestPerformer ? {
+        token_name: bestPerformer.token_name,
+        token_symbol: bestPerformer.token_symbol,
+        pnl_percent: bestPerformer.pnl_percent,
+        hold_time: bestPerformer.hold_time
+      } : null,
+      worst_performer: worstPerformer ? {
+        token_name: worstPerformer.token_name,
+        token_symbol: worstPerformer.token_symbol,
+        pnl_percent: worstPerformer.pnl_percent,
+        hold_time: worstPerformer.hold_time
+      } : null,
+      average_hold_time_minutes: sellTx.length > 0 ? 
+        sellTx.reduce((sum, tx) => sum + (tx.hold_time_minutes || 0), 0) / sellTx.length : 0,
+      gas_fees_total_sol: todayTx.reduce((sum, tx) => sum + (tx.gas_fee || 0), 0)
+    };
+    
+    await fs.writeFile(LOG_FILES.DAILY_SUMMARY, JSON.stringify(summary, null, 2));
+    console.log(`📈 Daily summary generated: ${summary.trades_count} trades, ${summary.win_rate.toFixed(1)}% win rate`);
+    
+    return summary;
+    
+  } catch (error) {
+    console.error('❌ Daily summary generation failed:', error.message);
+    return null;
+  }
+}
+
+// Rotate log files if they get too large
+async function rotateLogFileIfNeeded(filePath) {
+  try {
+    const stats = await fs.stat(filePath);
+    const fileSizeMB = stats.size / (1024 * 1024);
+    
+    if (fileSizeMB > MEME_CONFIG.LOGGING.MAX_LOG_FILE_SIZE_MB) {
+      const timestamp = new Date().toISOString().split('T')[0];
+      const fileName = path.basename(filePath, '.json');
+      const backupPath = path.join(BACKUP_DIR, `${timestamp}_${fileName}.json`);
+      
+      await fs.copyFile(filePath, backupPath);
+      await fs.writeFile(filePath, JSON.stringify([], null, 2));
+      
+      console.log(`🔄 Rotated ${fileName}.json (${fileSizeMB.toFixed(1)}MB)`);
+    }
+  } catch (error) {
+    console.error('❌ Log rotation failed:', error.message);
+  }
+}
+
+// Cleanup old backups
+async function cleanupOldBackups() {
+  try {
+    const files = await fs.readdir(BACKUP_DIR);
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - MEME_CONFIG.LOGGING.BACKUP_RETENTION_DAYS);
+    
+    for (const file of files) {
+      const filePath = path.join(BACKUP_DIR, file);
+      const stats = await fs.stat(filePath);
+      
+      if (stats.mtime < cutoffDate) {
+        await fs.unlink(filePath);
+        console.log(`🗑️ Deleted old backup: ${file}`);
+      }
+    }
+  } catch (error) {
+    console.error('❌ Backup cleanup failed:', error.message);
+  }
+}
 
 // ========== UTILITY FUNCTIONS ==========
 async function sleep(ms) {
@@ -107,16 +472,16 @@ function getCurrentHourUTC() {
 
 function isWeekend() {
   const day = new Date().getUTCDay();
-  return day === 0 || day === 6; // Sunday = 0, Saturday = 6
+  return day === 0 || day === 6;
 }
 
 function isNightTime() {
   const hour = getCurrentHourUTC();
-  return hour >= 22 || hour <= 6; // 10PM - 6AM UTC
+  return hour >= 22 || hour <= 6;
 }
 
 function getTodayKey() {
-  return new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  return new Date().toISOString().split('T')[0];
 }
 
 // ========== INTELLIGENT TRAILING STOP LOSS ==========
@@ -125,7 +490,6 @@ function calculateTrailingStopLoss(position) {
   const ageInHours = (now - position.entryDate) / (1000 * 60 * 60);
   const currentPnL = position.pnlPercent || 0;
   
-  // Grace period - no stop loss for new positions
   if (ageInHours < MEME_CONFIG.TRAILING_STOP.GRACE_PERIOD_HOURS) {
     return {
       stopLoss: null,
@@ -133,7 +497,6 @@ function calculateTrailingStopLoss(position) {
     };
   }
   
-  // Find the highest applicable trailing level
   let applicableStopLoss = MEME_CONFIG.TRAILING_STOP.INITIAL_STOP_PERCENT;
   let appliedLevel = null;
   
@@ -142,11 +505,10 @@ function calculateTrailingStopLoss(position) {
       applicableStopLoss = level.stopLoss;
       appliedLevel = level;
     } else {
-      break; // Levels are ordered, so we can break early
+      break;
     }
   }
   
-  // Apply time-based multipliers for volatility buffer
   let volatilityMultiplier = 1;
   if (isWeekend()) {
     volatilityMultiplier *= MEME_CONFIG.TRAILING_STOP.WEEKEND_MULTIPLIER;
@@ -155,7 +517,6 @@ function calculateTrailingStopLoss(position) {
     volatilityMultiplier *= MEME_CONFIG.TRAILING_STOP.NIGHT_MULTIPLIER;
   }
   
-  // Add volatility buffer
   const buffer = MEME_CONFIG.TRAILING_STOP.VOLATILITY_BUFFER * volatilityMultiplier;
   const adjustedStopLoss = applicableStopLoss - buffer;
   
@@ -173,21 +534,16 @@ function calculateTrailingStopLoss(position) {
 function shouldSellWithTrailingStop(position) {
   const currentPnL = position.pnlPercent || 0;
   
-  // Update highest PnL if current is higher
   if (currentPnL > (position.highestPnL || position.entryPnL || 0)) {
     position.highestPnL = currentPnL;
     position.highestPnLDate = new Date();
     console.log(`📈 New high for ${position.tokenName}: ${currentPnL.toFixed(2)}%`);
   }
   
-  // Calculate current trailing stop
   const trailingStop = calculateTrailingStopLoss(position);
-  
-  // Update position with current stop level for tracking
   position.currentStopLoss = trailingStop.stopLoss;
   position.stopReason = trailingStop.reason;
   
-  // Check if we should sell
   if (trailingStop.stopLoss !== null && currentPnL <= trailingStop.stopLoss) {
     return {
       shouldSell: true,
@@ -197,7 +553,6 @@ function shouldSellWithTrailingStop(position) {
     };
   }
   
-  // Age-based forced exit for very old positions with poor performance
   const ageInDays = (new Date() - position.entryDate) / (1000 * 60 * 60 * 24);
   if (ageInDays > 21 && currentPnL < -50) {
     return {
@@ -207,7 +562,6 @@ function shouldSellWithTrailingStop(position) {
     };
   }
   
-  // Cleanup very small positions
   if (position.currentValue < MEME_CONFIG.MIN_POSITION_VALUE_EUR) {
     return {
       shouldSell: true,
@@ -217,41 +571,6 @@ function shouldSellWithTrailingStop(position) {
   }
   
   return { shouldSell: false };
-}
-
-// ========== PERFORMANCE TRACKING ==========
-function logPerformance(action, tokenAddress, tokenName, entryPrice, currentPrice, pnlPercent, additionalInfo = {}) {
-  if (!MEME_CONFIG.PERFORMANCE_LOG_ENABLED) return;
-  
-  const logEntry = {
-    timestamp: new Date().toISOString(),
-    action,
-    tokenAddress,
-    tokenName,
-    entryPrice,
-    currentPrice,
-    pnlPercent,
-    tradeNumber: totalTrades,
-    ...additionalInfo
-  };
-  
-  performanceLog.push(logEntry);
-  
-  console.log(`\n📊 PERFORMANCE LOG - ${action.toUpperCase()}`);
-  console.log(`Token: ${tokenName} (${tokenAddress.slice(0,8)}...)`);
-  if (entryPrice && currentPrice) {
-    console.log(`Entry: $${entryPrice.toFixed(6)} | Current: $${currentPrice.toFixed(6)}`);
-  }
-  if (pnlPercent !== undefined) {
-    console.log(`P&L: ${pnlPercent > 0 ? '+' : ''}${pnlPercent.toFixed(2)}%`);
-  }
-  if (additionalInfo.holdTime) {
-    console.log(`Hold Time: ${additionalInfo.holdTime}`);
-  }
-  if (additionalInfo.highestPnL) {
-    console.log(`Peak Gain: +${additionalInfo.highestPnL.toFixed(2)}%`);
-  }
-  console.log(`Total Trades: ${totalTrades} | Win Rate: ${totalTrades > 0 ? (winningTrades/totalTrades*100).toFixed(1) : 0}%`);
 }
 
 // ========== TOKEN BALANCE & PRICE FUNCTIONS ==========
@@ -297,14 +616,12 @@ async function updatePortfolioTracker() {
     const pnlPercent = position.entryPrice > 0 ? 
       ((currentPrice - position.entryPrice) / position.entryPrice) * 100 : 0;
     
-    // Calculate hold time
     const holdTimeMs = new Date() - position.entryDate;
     const holdTimeHours = holdTimeMs / (1000 * 60 * 60);
     const holdTimeText = holdTimeHours < 24 ? 
       `${holdTimeHours.toFixed(1)}h` : 
       `${(holdTimeHours/24).toFixed(1)}d`;
     
-    // Update position
     portfolioTracker.set(tokenAddress, {
       ...position,
       currentBalance,
@@ -315,7 +632,6 @@ async function updatePortfolioTracker() {
       lastUpdated: new Date()
     });
     
-    // Calculate current trailing stop for display
     const trailingInfo = calculateTrailingStopLoss(position);
     const stopDisplay = trailingInfo.stopLoss !== null ? 
       `Stop: ${trailingInfo.stopLoss.toFixed(1)}%` : 
@@ -339,7 +655,6 @@ async function sellToken(tokenAddress, position, sellInfo) {
       return { success: false, error: 'No balance' };
     }
     
-    // Get quote for selling
     const decimals = position.decimals || 9;
     const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=${tokenAddress}&outputMint=So11111111111111111111111111111111111111112&amount=${Math.floor(balance * Math.pow(10, decimals))}&slippageBps=${MEME_CONFIG.SLIPPAGE_BPS}`;
     
@@ -347,10 +662,17 @@ async function sellToken(tokenAddress, position, sellInfo) {
     const quoteData = await quoteResponse.json();
     
     if (quoteData.error) {
+      const failedData = {
+        action: 'SELL_QUOTE_FAILED',
+        token_address: tokenAddress,
+        token_name: position.tokenName,
+        error: quoteData.error,
+        reason: sellInfo.reason
+      };
+      await logFailedTransaction(failedData);
       throw new Error(`Sell quote error: ${quoteData.error}`);
     }
     
-    // Execute sell transaction
     const swapRequestBody = {
       quoteResponse: quoteData,
       userPublicKey: wallet.publicKey.toString(),
@@ -368,6 +690,14 @@ async function sellToken(tokenAddress, position, sellInfo) {
     
     const swapData = await swapResponse.json();
     if (!swapData.swapTransaction) {
+      const failedData = {
+        action: 'SELL_SWAP_FAILED',
+        token_address: tokenAddress,
+        token_name: position.tokenName,
+        error: 'Failed to create sell transaction',
+        reason: sellInfo.reason
+      };
+      await logFailedTransaction(failedData);
       throw new Error('Failed to create sell transaction');
     }
     
@@ -392,18 +722,43 @@ async function sellToken(tokenAddress, position, sellInfo) {
       `${holdTimeHours.toFixed(1)}h` : 
       `${(holdTimeHours/24).toFixed(1)}d`;
     
+    const gasFee = 0.002; // Estimated sell gas fee
+    
+    // Log the sell transaction
+    const sellTxData = {
+      action: 'SELL',
+      token_address: tokenAddress,
+      token_name: position.tokenName,
+      token_symbol: position.tokenSymbol,
+      amount_sol: position.amountSol,
+      tokens_sold: balance,
+      entry_price: position.entryPrice,
+      exit_price: position.currentPrice,
+      gas_fee: gasFee,
+      signature: signature,
+      pnl_percent: position.pnlPercent,
+      pnl_absolute_sol: (position.currentValue / currentSolPrice) - position.amountSol,
+      hold_time: holdTimeText,
+      hold_time_minutes: Math.round(holdTimeMs / (1000 * 60)),
+      sell_reason: sellInfo.reason,
+      sell_details: sellInfo.details,
+      highest_pnl: position.highestPnL || position.pnlPercent,
+      market_cap: position.marketCap || 0,
+      trailing_info: sellInfo.trailingInfo
+    };
+    
+    await logTransaction(sellTxData);
+    await logGasFee({
+      gasFee: gasFee,
+      priorityFee: MEME_CONFIG.PRIORITY_FEE_SOL,
+      type: 'SELL',
+      signature: signature
+    });
+    
     // Update performance tracking
     if (position.pnlPercent > 0) {
       winningTrades++;
     }
-    
-    logPerformance('SELL', tokenAddress, position.tokenName, 
-      position.entryPrice, position.currentPrice, position.pnlPercent, {
-        holdTime: holdTimeText,
-        highestPnL: position.highestPnL || position.pnlPercent,
-        sellReason: sellInfo.reason,
-        sellDetails: sellInfo.details
-      });
     
     // Remove from portfolio tracker
     portfolioTracker.delete(tokenAddress);
@@ -417,6 +772,16 @@ async function sellToken(tokenAddress, position, sellInfo) {
     
   } catch (error) {
     console.error('❌ Error selling token:', error.message);
+    
+    const failedData = {
+      action: 'SELL_EXECUTION_FAILED',
+      token_address: tokenAddress,
+      token_name: position.tokenName,
+      error: error.message,
+      reason: sellInfo.reason
+    };
+    await logFailedTransaction(failedData);
+    
     return { success: false, error: error.message };
   }
 }
@@ -435,21 +800,23 @@ async function performIntelligentPortfolioManagement() {
       console.log(`\n🎯 Sell signal: ${position.tokenName} - ${sellDecision.reason}`);
       await sellToken(tokenAddress, position, sellDecision);
       sellActions++;
-      await sleep(2000); // Pause between sells
+      await sleep(2000);
     }
   }
   
   console.log(`📊 Portfolio management complete: ${sellActions} sells executed`);
   console.log(`📈 Current portfolio size: ${portfolioTracker.size} positions`);
   
-  // Log portfolio summary
+  // Update portfolio log after management
+  await updatePortfolioLog();
+  
   if (portfolioTracker.size > 0) {
     const totalValue = Array.from(portfolioTracker.values())
       .reduce((sum, pos) => sum + (pos.currentValue || 0), 0);
     const avgPnL = Array.from(portfolioTracker.values())
       .reduce((sum, pos) => sum + (pos.pnlPercent || 0), 0) / portfolioTracker.size;
     
-    console.log(`💰 Total portfolio value: $${totalValue.toFixed(2)}`);
+    console.log(`💰 Total portfolio value: ${totalValue.toFixed(2)}`);
     console.log(`📊 Average P&L: ${avgPnL > 0 ? '+' : ''}${avgPnL.toFixed(2)}%`);
   }
 }
@@ -477,18 +844,15 @@ function incrementDailyTradeCount() {
 async function checkRiskLimits() {
   const solBalance = await connection.getBalance(wallet.publicKey) / 1e9;
   
-  // Check minimum wallet reserve
   if (solBalance < MEME_CONFIG.MIN_WALLET_RESERVE) {
     console.log(`⚠️ LOW BALANCE: ${solBalance.toFixed(4)} SOL < ${MEME_CONFIG.MIN_WALLET_RESERVE} SOL reserve`);
     return false;
   }
   
-  // Check daily trade limit
   if (!canTradeToday()) {
     return false;
   }
   
-  // Check maximum positions
   if (portfolioTracker.size >= MEME_CONFIG.MAX_POSITIONS) {
     console.log(`⚠️ MAX POSITIONS: ${portfolioTracker.size}/${MEME_CONFIG.MAX_POSITIONS}`);
     await performIntelligentPortfolioManagement();
@@ -544,27 +908,47 @@ async function getTokenDecimals(connection, mintAddress) {
 async function buyToken(tokenAddress, amountSol) {
   try {
     console.log(`\n💰 Attempting to buy token: ${tokenAddress}`);
-    console.log(`💵 Amount: ${amountSol} SOL (~€${(amountSol * 135).toFixed(2)})`);
+    console.log(`💵 Amount: ${amountSol} SOL (~€${(amountSol * currentSolPrice).toFixed(2)})`);
 
     const outputDecimals = await getTokenDecimals(connection, tokenAddress);
     if (outputDecimals === null) {
+      const failedData = {
+        action: 'BUY_DECIMALS_FAILED',
+        token_address: tokenAddress,
+        error: 'Failed to fetch token decimals',
+        amount_sol: amountSol
+      };
+      await logFailedTransaction(failedData);
       throw new Error('Failed to fetch token decimals');
     }
 
     const initialBalance = await connection.getBalance(wallet.publicKey);
     console.log(`💳 Current SOL balance: ${(initialBalance / 1e9).toFixed(4)} SOL`);
 
-    // Get quote from Jupiter
     const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${tokenAddress}&amount=${Math.floor(amountSol * 1e9)}&slippageBps=${MEME_CONFIG.SLIPPAGE_BPS}`;
     
     const quoteResponse = await fetch(quoteUrl);
     const quoteData = await quoteResponse.json();
 
     if (quoteData.error) {
+      const failedData = {
+        action: 'BUY_QUOTE_FAILED',
+        token_address: tokenAddress,
+        error: quoteData.error,
+        amount_sol: amountSol
+      };
+      await logFailedTransaction(failedData);
       throw new Error(`Quote error: ${quoteData.error}`);
     }
 
     if (!quoteData.outAmount) {
+      const failedData = {
+        action: 'BUY_INVALID_QUOTE',
+        token_address: tokenAddress,
+        error: 'Invalid quote response',
+        amount_sol: amountSol
+      };
+      await logFailedTransaction(failedData);
       throw new Error(`Invalid quote response`);
     }
 
@@ -574,13 +958,19 @@ async function buyToken(tokenAddress, amountSol) {
 
     console.log(`📊 Quote: ${outputAmount.toFixed(6)} tokens | Impact: ${priceImpact.toFixed(2)}% | Route: ${quoteData.routePlan?.[0]?.swapInfo?.label || 'Unknown'}`);
 
-    // Check price impact
     if (priceImpact > 12) {
+      const failedData = {
+        action: 'BUY_HIGH_IMPACT',
+        token_address: tokenAddress,
+        error: `Price impact too high: ${priceImpact.toFixed(2)}%`,
+        price_impact: priceImpact,
+        amount_sol: amountSol
+      };
+      await logFailedTransaction(failedData);
       console.log(`⚠️ Price impact too high: ${priceImpact.toFixed(2)}% - skipping`);
       return { success: false, error: 'Price impact too high' };
     }
 
-    // Create swap transaction
     const swapRequestBody = {
       quoteResponse: quoteData,
       userPublicKey: wallet.publicKey.toString(),
@@ -598,10 +988,16 @@ async function buyToken(tokenAddress, amountSol) {
 
     const swapData = await swapResponse.json();
     if (!swapData.swapTransaction) {
+      const failedData = {
+        action: 'BUY_SWAP_FAILED',
+        token_address: tokenAddress,
+        error: 'Failed to create swap transaction',
+        amount_sol: amountSol
+      };
+      await logFailedTransaction(failedData);
       throw new Error('Failed to create swap transaction');
     }
 
-    // Execute transaction
     const swapTransactionBuf = Buffer.from(swapData.swapTransaction, 'base64');
     const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
     transaction.sign([wallet]);
@@ -626,6 +1022,14 @@ async function buyToken(tokenAddress, amountSol) {
 
     console.log(`✅ Purchase complete! Gas: ${gasFee.toFixed(6)} SOL | Tokens: ${tokenAmount}`);
 
+    // Log gas fee
+    await logGasFee({
+      gasFee: gasFee,
+      priorityFee: MEME_CONFIG.PRIORITY_FEE_SOL,
+      type: 'BUY',
+      signature: signature
+    });
+
     return {
       success: true,
       signature,
@@ -636,6 +1040,15 @@ async function buyToken(tokenAddress, amountSol) {
     };
   } catch (error) {
     console.error('❌ Buy error:', error.message);
+    
+    const failedData = {
+      action: 'BUY_EXECUTION_FAILED',
+      token_address: tokenAddress,
+      error: error.message,
+      amount_sol: amountSol
+    };
+    await logFailedTransaction(failedData);
+    
     return { success: false, error: error.message };
   }
 }
@@ -653,18 +1066,17 @@ function selectBestMemeCoins(filteredPairs) {
     const volume24h = pair.pair.volume?.h24 || 0;
     const volume5m = pair.pair.volume?.m5 || 0;
 
-    // Advanced scoring for meme coins
-    const momentumScore = volume5m * 12; // Recent activity
-    const liquidityScore = liquidity / Math.max(marketCap, 1) * 100; // Liquidity ratio
-    const ageScore = ageInHours < 3 ? 2.0 : ageInHours < 12 ? 1.5 : 1.0; // Fresh bonus
-    const volumeScore = volume24h / Math.max(ageInHours, 1); // Volume per hour
+    const momentumScore = volume5m * 12;
+    const liquidityScore = liquidity / Math.max(marketCap, 1) * 100;
+    const ageScore = ageInHours < 3 ? 2.0 : ageInHours < 12 ? 1.5 : 1.0;
+    const volumeScore = volume24h / Math.max(ageInHours, 1);
     
     const totalScore = (
-      (momentumScore * 0.30) +      // Recent momentum is key
-      (liquidityScore * 0.25) +     // Good liquidity for exits
-      (volumeScore * 0.25) +        // Sustained activity
-      (marketCap * 0.15) +          // Size matters
-      (ageScore * 1000 * 0.05)      // Fresh coin bonus
+      (momentumScore * 0.30) +
+      (liquidityScore * 0.25) +
+      (volumeScore * 0.25) +
+      (marketCap * 0.15) +
+      (ageScore * 1000 * 0.05)
     );
 
     return {
@@ -690,8 +1102,8 @@ function selectBestMemeCoins(filteredPairs) {
     
     console.log(`\n${index + 1}. ${pair.pair.baseToken.name || 'Unknown'} (${pair.pair.baseToken.symbol})`);
     console.log(`   Age: ${ageText} | Score: ${Math.round(pair.totalScore)}`);
-    console.log(`   MC: $${pair.marketCap.toLocaleString()} | Liq: $${pair.pair.liquidity?.usd?.toLocaleString() || '0'}`);
-    console.log(`   Vol 24h: $${pair.pair.volume?.h24?.toLocaleString() || '0'} | 5m: $${pair.pair.volume?.m5?.toLocaleString() || '0'}`);
+    console.log(`   MC: ${pair.marketCap.toLocaleString()} | Liq: ${pair.pair.liquidity?.usd?.toLocaleString() || '0'}`);
+    console.log(`   Vol 24h: ${pair.pair.volume?.h24?.toLocaleString() || '0'} | 5m: ${pair.pair.volume?.m5?.toLocaleString() || '0'}`);
     console.log(`   Momentum: ${Math.round(pair.momentumScore)} | Liq Ratio: ${pair.liquidityScore.toFixed(2)}%`);
   });
 
@@ -704,19 +1116,19 @@ async function processIntelligentTrading(retryCount = 0, topTokens = null) {
     console.log(`\n🤖 INTELLIGENT MEME TRADING - Cycle ${retryCount + 1}`);
     console.log(`⏰ ${new Date().toLocaleString()} | UTC Hour: ${getCurrentHourUTC()}`);
     
-    // Check risk limits first
+    // Update SOL price
+    await updateSolPrice();
+    
     const riskCheckPassed = await checkRiskLimits();
     if (!riskCheckPassed) {
       console.log('🛑 Risk check failed - pausing trading');
       return;
     }
     
-    // Portfolio management every 3rd cycle
     if (retryCount % 3 === 0 && portfolioTracker.size > 0) {
       await performIntelligentPortfolioManagement();
     }
     
-    // Fetch new tokens if needed
     if (!topTokens) {
       console.log('🔍 Scanning for fresh meme coins...');
       const url = 'https://api.dexscreener.com/token-profiles/latest/v1';
@@ -733,7 +1145,6 @@ async function processIntelligentTrading(retryCount = 0, topTokens = null) {
       console.log(`📊 Analyzing ${jsonData.length} potential meme coins...`);
 
       for (const token of jsonData) {
-        // Skip if already processed or owned
         if (postedTokens.has(token.tokenAddress) || portfolioTracker.has(token.tokenAddress)) {
           continue;
         }
@@ -751,12 +1162,10 @@ async function processIntelligentTrading(retryCount = 0, topTokens = null) {
             });
           }
         } catch (error) {
-          // Skip problematic tokens
           continue;
         }
       }
 
-      // Apply intelligent filters
       let filteredPairs = allPairs.filter(item => {
         return item.marketCap >= MEME_CONFIG.MIN_MARKET_CAP && 
                item.marketCap <= MEME_CONFIG.MAX_MARKET_CAP &&
@@ -777,14 +1186,12 @@ async function processIntelligentTrading(retryCount = 0, topTokens = null) {
       }
     }
 
-    // Select token to buy
     const currentTokenIndex = retryCount % topTokens.length;
     const selectedToken = topTokens[currentTokenIndex];
 
     console.log(`\n🎯 Selected: ${selectedToken.pair.baseToken.name}`);
-    console.log(`📊 MC: $${selectedToken.marketCap.toLocaleString()} | Score: ${Math.round(selectedToken.totalScore)}`);
+    console.log(`📊 MC: ${selectedToken.marketCap.toLocaleString()} | Score: ${Math.round(selectedToken.totalScore)}`);
 
-    // Execute purchase
     const purchaseResult = await buyToken(selectedToken.token.tokenAddress, MEME_CONFIG.AMOUNT_TO_SPEND);
 
     if (!purchaseResult.success) {
@@ -800,8 +1207,9 @@ async function processIntelligentTrading(retryCount = 0, topTokens = null) {
       }
     }
 
-    // Add to intelligent portfolio tracker
     const currentPrice = await getTokenPrice(selectedToken.token.tokenAddress);
+    
+    // Add to intelligent portfolio tracker
     portfolioTracker.set(selectedToken.token.tokenAddress, {
       tokenName: selectedToken.pair.baseToken.name,
       tokenSymbol: selectedToken.pair.baseToken.symbol,
@@ -817,21 +1225,34 @@ async function processIntelligentTrading(retryCount = 0, topTokens = null) {
       gasFee: purchaseResult.gasFee,
       priceImpact: purchaseResult.priceImpact,
       currentStopLoss: null,
-      stopReason: 'Grace period active'
+      stopReason: 'Grace period active',
+      marketCap: selectedToken.marketCap
     });
 
-    // Update counters
+    // Log the buy transaction
+    const buyTxData = {
+      action: 'BUY',
+      token_address: selectedToken.token.tokenAddress,
+      token_name: selectedToken.pair.baseToken.name,
+      token_symbol: selectedToken.pair.baseToken.symbol,
+      amount_sol: MEME_CONFIG.AMOUNT_TO_SPEND,
+      tokens_received: purchaseResult.tokenAmount,
+      entry_price: currentPrice,
+      gas_fee: purchaseResult.gasFee,
+      signature: purchaseResult.signature,
+      market_cap: selectedToken.marketCap,
+      liquidity: selectedToken.pair.liquidity?.usd || 0,
+      price_impact: purchaseResult.priceImpact,
+      volume_24h: selectedToken.pair.volume?.h24 || 0,
+      total_score: selectedToken.totalScore,
+      route: selectedToken.pair.dexId || 'Unknown'
+    };
+    
+    await logTransaction(buyTxData);
+
     totalTrades++;
     incrementDailyTradeCount();
-    
-    logPerformance('BUY', selectedToken.token.tokenAddress, 
-      selectedToken.pair.baseToken.name, currentPrice, currentPrice, 0, {
-        marketCap: selectedToken.marketCap,
-        totalScore: selectedToken.totalScore,
-        tradeNumber: totalTrades
-      });
 
-    // Generate tweet if configured
     if (SECRETS.CHATGPT_API_KEY && SECRETS.APP_KEY) {
       try {
         const prompt = `You are Milo, an AI trading bot. You just bought ${selectedToken.pair.baseToken.name} (${Math.floor(purchaseResult.tokenAmount)} ${selectedToken.pair.baseToken.symbol}). Write a confident but not overhyped tweet about this meme coin purchase. Keep it under 200 characters and professional.`;
@@ -853,6 +1274,9 @@ async function processIntelligentTrading(retryCount = 0, topTokens = null) {
 
     postedTokens.add(selectedToken.token.tokenAddress);
     
+    // Update portfolio log after purchase
+    await updatePortfolioLog();
+    
     console.log(`\n🎉 PURCHASE COMPLETE!`);
     console.log(`📊 Portfolio: ${portfolioTracker.size} positions | Daily: ${dailyTradeCount.get(getTodayKey()) || 0}/${MEME_CONFIG.MAX_DAILY_TRADES}`);
     console.log(`📈 Win Rate: ${totalTrades > 0 ? (winningTrades/totalTrades*100).toFixed(1) : 0}% (${winningTrades}/${totalTrades})`);
@@ -868,30 +1292,152 @@ async function processIntelligentTrading(retryCount = 0, topTokens = null) {
   }
 }
 
+// ========== LOGGING SCHEDULER ==========
+function startLoggingScheduler() {
+  // Portfolio snapshots every 15 minutes
+  const snapshotInterval = MEME_CONFIG.LOGGING.SNAPSHOT_INTERVAL_MINUTES * 60 * 1000;
+  setInterval(createPortfolioSnapshot, snapshotInterval);
+  
+  // Daily summary at midnight UTC
+  setInterval(() => {
+    const now = new Date();
+    if (now.getUTCHours() === 0 && now.getUTCMinutes() < 15) {
+      generateDailySummary();
+    }
+  }, 15 * 60 * 1000); // Check every 15 minutes
+  
+  // Cleanup old backups weekly
+  setInterval(cleanupOldBackups, 7 * 24 * 60 * 60 * 1000);
+  
+  // Initial snapshot
+  setTimeout(createPortfolioSnapshot, 30000); // After 30 seconds
+  
+  console.log(`📸 Snapshot scheduler started: Every ${MEME_CONFIG.LOGGING.SNAPSHOT_INTERVAL_MINUTES} minutes`);
+}
+
+// ========== SIMPLE HTTP SERVER FOR LOG VIEWING ==========
+function startLogViewerServer() {
+  const server = http.createServer(async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'application/json');
+    
+    try {
+      if (req.url === '/portfolio') {
+        const data = await fs.readFile(LOG_FILES.PORTFOLIO, 'utf8');
+        res.writeHead(200);
+        res.end(data);
+      } else if (req.url === '/transactions') {
+        const data = await fs.readFile(LOG_FILES.TRANSACTIONS, 'utf8');
+        res.writeHead(200);
+        res.end(data);
+      } else if (req.url === '/snapshots') {
+        const data = await fs.readFile(LOG_FILES.SNAPSHOTS, 'utf8');
+        res.writeHead(200);
+        res.end(data);
+      } else if (req.url === '/daily') {
+        const data = await fs.readFile(LOG_FILES.DAILY_SUMMARY, 'utf8');
+        res.writeHead(200);
+        res.end(data);
+      } else if (req.url === '/failed') {
+        const data = await fs.readFile(LOG_FILES.FAILED_TRANSACTIONS, 'utf8');
+        res.writeHead(200);
+        res.end(data);
+      } else if (req.url === '/gas') {
+        const data = await fs.readFile(LOG_FILES.GAS_TRACKER, 'utf8');
+        res.writeHead(200);
+        res.end(data);
+      } else if (req.url === '/status') {
+        const status = {
+          timestamp: new Date().toISOString(),
+          sol_price_eur: currentSolPrice,
+          portfolio_size: portfolioTracker.size,
+          total_trades: totalTrades,
+          win_rate: totalTrades > 0 ? (winningTrades/totalTrades*100) : 0,
+          daily_trades: dailyTradeCount.get(getTodayKey()) || 0,
+          wallet_address: wallet.publicKey.toString()
+        };
+        res.writeHead(200);
+        res.end(JSON.stringify(status, null, 2));
+      } else {
+        res.writeHead(200);
+        res.end(JSON.stringify({
+          message: 'Milo 2.0 Professional Logging API',
+          endpoints: [
+            '/portfolio - Current portfolio status',
+            '/transactions - All transaction history', 
+            '/snapshots - 15-minute portfolio snapshots',
+            '/daily - Daily summary',
+            '/failed - Failed transactions log',
+            '/gas - Gas fee tracking',
+            '/status - Current bot status'
+          ],
+          timestamp: new Date().toISOString()
+        }, null, 2));
+      }
+    } catch (error) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: error.message }));
+    }
+  });
+  
+  const port = process.env.PORT || 3000;
+  server.listen(port, () => {
+    console.log(`🌐 Log viewer server running on port ${port}`);
+    console.log(`📊 Access logs at: http://localhost:${port}/portfolio`);
+  });
+}
+
 // ========== STARTUP ==========
 async function startIntelligentMiloBot() {
-  console.log('\n🤖 STARTING INTELLIGENT MILO 2.0');
-  console.log('=====================================');
+  console.log('\n🤖 STARTING INTELLIGENT MILO 2.0 WITH PROFESSIONAL LOGGING');
+  console.log('================================================================');
   console.log(`💰 Trade Size: ${MEME_CONFIG.AMOUNT_TO_SPEND} SOL (~€${(MEME_CONFIG.AMOUNT_TO_SPEND * 135).toFixed(2)})`);
   console.log(`📊 Max Positions: ${MEME_CONFIG.MAX_POSITIONS} | Daily Limit: ${MEME_CONFIG.MAX_DAILY_TRADES}`);
   console.log(`⚡ Slippage: ${MEME_CONFIG.SLIPPAGE_BPS/100}% | Priority: ${MEME_CONFIG.PRIORITY_FEE_SOL} SOL`);
-  console.log(`🎯 MC Range: $${MEME_CONFIG.MIN_MARKET_CAP.toLocaleString()} - $${MEME_CONFIG.MAX_MARKET_CAP.toLocaleString()}`);
+  console.log(`🎯 MC Range: ${MEME_CONFIG.MIN_MARKET_CAP.toLocaleString()} - ${MEME_CONFIG.MAX_MARKET_CAP.toLocaleString()}`);
   console.log(`🛡️ Intelligent Trailing Stops: Grace ${MEME_CONFIG.TRAILING_STOP.GRACE_PERIOD_HOURS}h | Initial ${MEME_CONFIG.TRAILING_STOP.INITIAL_STOP_PERCENT}%`);
   console.log(`⏰ 24/7 Trading: Active | Weekend Buffer: +${(MEME_CONFIG.TRAILING_STOP.WEEKEND_MULTIPLIER-1)*100}%`);
-  console.log('=====================================\n');
+  console.log(`📝 Professional Logging: ${MEME_CONFIG.LOGGING.SNAPSHOT_INTERVAL_MINUTES}min snapshots | ${MEME_CONFIG.LOGGING.BACKUP_RETENTION_DAYS}d retention`);
+  console.log('================================================================\n');
+  
+  // Initialize logging system
+  await initializeLogging();
+  
+  // Start logging scheduler
+  startLoggingScheduler();
+  
+  // Start log viewer server
+  startLogViewerServer();
+  
+  // Update SOL price
+  await updateSolPrice();
+  console.log(`💱 Current SOL price: €${currentSolPrice}`);
   
   // Wallet status
   const initialBalance = await connection.getBalance(wallet.publicKey) / 1e9;
-  console.log(`💳 SOL Balance: ${initialBalance.toFixed(4)} SOL`);
+  console.log(`💳 SOL Balance: ${initialBalance.toFixed(4)} SOL (€${(initialBalance * currentSolPrice).toFixed(2)})`);
   console.log(`🔑 Wallet: ${wallet.publicKey.toString()}`);
   
   if (initialBalance < MEME_CONFIG.MIN_WALLET_RESERVE) {
     console.log(`⚠️ LOW BALANCE WARNING! Minimum: ${MEME_CONFIG.MIN_WALLET_RESERVE} SOL`);
   }
   
+  // Log initial state
+  await updatePortfolioLog();
+  await createPortfolioSnapshot();
+  
+  console.log('\n📊 PROFESSIONAL LOGGING ACTIVE:');
+  console.log(`📝 Transactions: ${LOG_FILES.TRANSACTIONS}`);
+  console.log(`📈 Portfolio: ${LOG_FILES.PORTFOLIO}`);
+  console.log(`📸 Snapshots: ${LOG_FILES.SNAPSHOTS} (every ${MEME_CONFIG.LOGGING.SNAPSHOT_INTERVAL_MINUTES}min)`);
+  console.log(`📋 Daily Summary: ${LOG_FILES.DAILY_SUMMARY}`);
+  console.log(`❌ Failed TXs: ${LOG_FILES.FAILED_TRANSACTIONS}`);
+  console.log(`⛽ Gas Tracker: ${LOG_FILES.GAS_TRACKER}`);
+  
   // Start trading
   const CYCLE_INTERVAL = 12 * 60 * 1000; // 12 minutes
-  console.log(`⏱️ Cycle interval: ${CYCLE_INTERVAL/60000} minutes\n`);
+  console.log(`\n⏱️ Cycle interval: ${CYCLE_INTERVAL/60000} minutes`);
+  console.log('🚀 Milo 2.0 with Professional Logging is now live!\n');
   
   // First run
   processIntelligentTrading();
